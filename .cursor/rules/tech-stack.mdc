@@ -1,0 +1,17 @@
+---
+description: Tech stack
+globs:
+alwaysApply: true
+---
+
+- Python 3.10+ as the main development language.
+- PyTorch for deep learning model development (bi-encoder, cross-encoder, training loops, mixed precision).
+- Hugging Face Transformers for loading and fine-tuning pretrained encoder models (DeBERTa, RoBERTa, MiniLM, BGE).
+- Sentence-Transformers for embedding model scaffolding, metric-learning losses (TripletLoss, CosineSimilarityLoss, MultipleNegativesRankingLoss), and training utilities.
+- Datasets (HuggingFace Datasets) for easy JSONL loading, preprocessing, and splitting into folds.
+- scikit-learn for k-fold cross-validation, metrics, and data preprocessing utilities.
+- NumPy / Pandas for dataset manipulation, embeddings handling, and saving Track B .npy outputs.
+- CUDA / RTX 4050 GPU with PyTorch GPU acceleration for all training tasks.
+- PyYAML or JSON for configuration files defining model paths, hyperparameters, and reproducible experiment settings.
+- tqdm for progress visualization during training and evaluation.
+- zip / Unix CLI tools for preparing the final CodaBench submission.

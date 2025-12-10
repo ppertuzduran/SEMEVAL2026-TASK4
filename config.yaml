@@ -1,0 +1,77 @@
+# Configuration for Narrative Similarity Training
+
+# General settings
+seed: 42
+device: cuda  # or cpu
+
+# Data paths
+data:
+  dev_track_a: "data/dev_track_a.jsonl"
+  dev_track_b: "data/dev_track_b.jsonl"
+  output_dir: "output"
+  prepared_data_dir: "data/prepared"
+
+# Track B - Bi-encoder settings
+track_b:
+  base_model: "all-MiniLM-L6-v2"  # Options: all-MiniLM-L6-v2, all-mpnet-base-v2, BAAI/bge-small-en-v1.5
+  model_save_path: "models/track_b_embedder"
+  
+  # Training hyperparameters
+  batch_size: 32
+  epochs: 10
+  learning_rate: 2.0e-5
+  warmup_steps: 100
+  weight_decay: 0.01
+  
+  # Loss configuration
+  triplet_margin: 0.5
+  use_multiple_negatives_ranking: true
+  loss_weights:
+    triplet: 0.5
+    cosine: 0.5
+  
+  # Training options
+  mixed_precision: true
+  gradient_clip: 1.0
+  eval_steps: 100
+  save_best_only: true
+
+# Track A - Cross-encoder settings
+track_a:
+  base_model: "roberta-base"  # Options: roberta-base, distilroberta-base, microsoft/deberta-v3-base
+  model_save_path: "models/track_a_cross_encoder"
+  
+  # Training hyperparameters
+  batch_size: 16
+  epochs: 5
+  learning_rate: 2.0e-5
+  warmup_ratio: 0.1
+  weight_decay: 0.01
+  
+  # Model configuration
+  max_length: 512
+  num_labels: 2
+  label_smoothing: 0.1
+  
+  # Training options
+  mixed_precision: true
+  gradient_clip: 1.0
+  eval_steps: 50
+  use_kfold: true
+  n_folds: 5
+  
+  # Ensemble settings (optional)
+  use_ensemble: false
+  ensemble_strategy: "average"  # average or vote
+
+# Data augmentation
+augmentation:
+  enable: true
+  swap_ab: true
+  word_drop_rate: 0.0  # 0.0 to disable
+
+# Evaluation
+evaluation:
+  metrics: ["accuracy"]
+  save_predictions: true
+

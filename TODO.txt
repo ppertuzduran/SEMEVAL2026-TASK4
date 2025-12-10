@@ -1,0 +1,132 @@
+# TODO for Improving Track A and Track B
+
+## 0. Environment Setup
+- [ ] Create a new virtualenv/conda env (Python 3.10+ recommended).
+- [ ] Install core dependencies:
+      - transformers
+      - sentence-transformers
+      - datasets
+      - torch (with CUDA for RTX 4050)
+      - scikit-learn
+      - numpy, pandas, tqdm, pyyaml
+- [ ] Verify GPU is visible in PyTorch.
+- [ ] Run existing baseline scripts (`python track_a.py`, `python track_b.py`) to confirm everything works.
+
+## 1. Data Preparation
+- [ ] Inspect existing `dev_track_a.jsonl` and `dev_track_b.jsonl` formats.
+- [ ] Implement `training/prepare_data.py` to:
+      - [ ] Load Track A JSONL.
+      - [ ] For each triple, identify anchor, positive (closer), negative (farther).
+      - [ ] Create and save a triplet dataset: `(anchor, positive, negative)`.
+      - [ ] Create and save a pairwise dataset: `(anchor, candidate, label)` where label ∈ {1.0, 0.0}.
+- [ ] (Optional) Implement simple text augmentations:
+      - [ ] A/B swap of candidates and label inversion.
+      - [ ] Light word-drop or noise for robustness.
+- [ ] Decide and implement train/dev split or k-fold fold indices for validation.
+
+## 2. Track B – Embedding Model (Bi-encoder)
+
+### 2.1 Model & Training Script
+- [ ] Choose base sentence-transformer model (start with `all-MiniLM-L6-v2`).
+- [ ] Implement `training/train_track_b.py`:
+      - [ ] Load base model and tokenizer.
+      - [ ] Load triplet dataset and pairwise dataset.
+      - [ ] Construct `Dataset` and `DataLoader` objects.
+      - [ ] Implement TripletLoss (margin-based, cosine distance).
+      - [ ] (Optional) Implement CosineSimilarityLoss or MultipleNegativesRankingLoss.
+      - [ ] Combine losses (alternate batches or weighted sum).
+
+### 2.2 Training Loop
+- [ ] Implement training loop with:
+      - [ ] AdamW optimizer.
+      - [ ] Linear warmup + cosine or linear decay scheduler.
+      - [ ] Mixed precision (fp16) for VRAM efficiency.
+      - [ ] Gradient clipping and logging of training loss.
+- [ ] Implement evaluation function:
+      - [ ] Encode all unique stories from Track B file.
+      - [ ] Reuse baseline evaluation logic on Track A dev triples (triple-wise accuracy).
+      - [ ] Track best dev accuracy and save best checkpoint.
+
+### 2.3 Checkpoints & Export
+- [ ] Define directory `models/track_b_embedder/`.
+- [ ] Save best performing sentence-transformer model + config.
+- [ ] Add script option to resume training from a checkpoint.
+
+## 3. Track B – Inference Integration
+
+- [ ] Modify `track_b.py`:
+      - [ ] Replace baseline sentence-BERT encoder with fine-tuned model.
+      - [ ] Ensure each story is encoded independently (no triple info at inference).
+      - [ ] Generate embeddings for all rows in `dev_track_b.jsonl`.
+      - [ ] Save embeddings as `.npy` in `outputs/` with the same shape and format as the baseline.
+- [ ] Verify that `python track_b.py` runs end-to-end and that the output passes the baseline evaluator.
+
+## 4. Track A – Cross-encoder Model
+
+### 4.1 Model & Data Formatting
+- [ ] Choose base cross-encoder model (e.g. `deberta-v3-base` or `roberta-base`).
+- [ ] Design input format:
+      - [ ] Concatenate: `[CLS] anchor [SEP] story A [SEP] story B [SEP]`.
+      - [ ] Implement truncation strategy (max 512 tokens) preserving start/end of each story.
+- [ ] Build PyTorch `Dataset` class for triples with labels (A-closer vs B-closer).
+
+### 4.2 Training Script
+- [ ] Implement `training/train_track_a.py`:
+      - [ ] Load base transformer + classification head (2 logits).
+      - [ ] Implement cross-entropy training with label smoothing.
+      - [ ] Add support for k-fold cross-validation (e.g., 5-fold):
+            - [ ] Generate train/val splits.
+            - [ ] Loop over folds and record accuracy per fold.
+- [ ] (Optional) Implement distillation:
+      - [ ] Compute soft labels from the fine-tuned Track B model or GPT-based teacher.
+      - [ ] Add auxiliary KL-divergence loss to mimic teacher probabilities.
+
+### 4.3 Training Loop & Checkpointing
+- [ ] Implement training loop (similar to Track B):
+      - [ ] AdamW optimizer, learning rate ~2e-5.
+      - [ ] Scheduler with warmup and linear/cosine decay.
+      - [ ] Mixed precision training.
+      - [ ] Early stopping based on validation accuracy.
+- [ ] Save best model per fold and/or final model trained on full data.
+- [ ] Choose final model strategy:
+      - [ ] Single best model, or
+      - [ ] Ensemble: average logits from k models at inference.
+
+## 5. Track A – Inference Integration
+
+- [ ] Modify `track_a.py`:
+      - [ ] Load final cross-encoder model(s) and tokenizer.
+      - [ ] For each triple, build input sequence and run forward pass.
+      - [ ] Obtain logits for A-closer vs B-closer:
+            - [ ] If prob(A) > prob(B) → `predicted_text_a_is_closer = True`, else False.
+      - [ ] Write predictions to output JSONL with the exact same schema as the baseline.
+- [ ] Verify that `python track_a.py` runs end-to-end and outputs in the expected format.
+
+## 6. Evaluation & Iteration
+
+- [ ] Implement `scripts/eval_local.py`:
+      - [ ] Load dev labels and model predictions.
+      - [ ] Compute accuracy and any other metrics used by the organizers.
+- [ ] Run local evaluation for:
+      - [ ] Baseline models (to establish reference scores).
+      - [ ] Fine-tuned Track B model with original Track A baseline (sanity check).
+      - [ ] Final Track A cross-encoder.
+- [ ] Compare improvements over baseline and log all results (e.g., in a CSV or markdown table).
+
+## 7. Packaging for Submission
+
+- [ ] Ensure `track_a.py` and `track_b.py` run with no external dependencies beyond the environment (no training at submission time).
+- [ ] Place final outputs in `outputs/` directory.
+- [ ] Test submission flow locally:
+      - [ ] `python track_a.py`
+      - [ ] `python track_b.py`
+      - [ ] `zip -j your_submission.zip outputs/*`
+- [ ] Confirm that the ZIP structure matches CodaBench / CodaLab requirements.
+
+## 8. Nice-to-have Improvements (Optional)
+
+- [ ] Add configuration files (YAML/JSON) for hyperparameters and paths.
+- [ ] Add experiment logging (tensorboard or simple CSV logs).
+- [ ] Implement seed fixing and deterministic data loading for reproducibility.
+- [ ] Try alternative base models (e.g., BGE-small, `distilroberta-base`) and compare.
+- [ ] Implement simple model ensembling for Track A (if runtime allows).
