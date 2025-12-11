@@ -2,6 +2,8 @@
 
 Deep learning solution for narrative similarity using cross-encoder (Track A) and bi-encoder (Track B) models.
 
+**⚠️ Python 3.11 Required** for local GPU training/inference with CUDA support.
+
 ## 🎯 Training Workflow
 
 **⚡ Train on Google Colab (GPU) → 💻 Inference Locally (CPU/GPU)**
@@ -17,16 +19,42 @@ Deep learning solution for narrative similarity using cross-encoder (Track A) an
 
 ## 🚀 Quick Start
 
-### 1. Push Code to GitHub (2 min)
+### 1. Setup Local Environment with GPU Support (5 min)
+
+**Requirements:**
+- Python 3.11 (required for CUDA compatibility)
+- NVIDIA GPU with CUDA support (e.g., RTX 4050)
+- ~5GB disk space
+
+**Create Python 3.11 Virtual Environment:**
 
 ```powershell
-cd C:\Users\pertu\OneDrive\Documentos\DEV\master\V4
-git init
-git add .
-git commit -m "Initial commit"
-git remote add origin https://github.com/YOUR_USERNAME/narrative-similarity.git
-git push -u origin main
+# Navigate to project directory
+cd C:\Users\pertu\OneDrive\Documentos\DEV\master\SEMEVAL2026-TASK4\v4
+
+# Create Python 3.11 virtual environment
+python3.11 -m venv venv311
+
+# Activate the environment
+.\venv311\Scripts\Activate.ps1
+
+# Install PyTorch with CUDA 12.1 support (for RTX 4050)
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+
+# Install remaining dependencies
+pip install -r requirements.txt
+
+# Verify GPU is available
+python -c "import torch; print(f'CUDA available: {torch.cuda.is_available()}'); print(f'GPU: {torch.cuda.get_device_name(0) if torch.cuda.is_available() else \"None\"}')"
 ```
+
+**Expected output:**
+```
+CUDA available: True
+GPU: NVIDIA GeForce RTX 4050 Laptop GPU
+```
+
+**Note:** Always activate `venv311` before running training or inference scripts to ensure GPU acceleration works properly.
 
 ### 2. Upload Data to Google Drive (2 min)
 
@@ -97,8 +125,8 @@ Expand-Archive -Path trained_models.zip -DestinationPath . -Force
 ### 5. Run Inference Locally
 
 ```powershell
-# Install dependencies (one time)
-pip install transformers sentence-transformers torch numpy pandas pyyaml
+# Activate the Python 3.11 virtual environment (if not already activated)
+.\venv311\Scripts\Activate.ps1
 
 # Run inference
 python track_b.py
@@ -107,6 +135,8 @@ python track_a.py
 # Evaluate
 python scripts/eval_local.py --track both
 ```
+
+**Note:** All dependencies should already be installed from step 1. GPU acceleration will be used automatically if available.
 
 ---
 
@@ -195,10 +225,14 @@ track_b:
 - ~2GB Google Drive space
 - Internet connection
 
-### For Local Inference
-- GPU: Optional (CPU works, slower)
-- RAM: 8GB+
-- Storage: ~2GB
+### For Local Inference/Training
+- **Python 3.11** (required for CUDA support)
+- **GPU**: NVIDIA GPU with CUDA support (e.g., RTX 4050)
+  - CUDA 12.1 or 11.8 compatible
+  - 6GB+ VRAM recommended
+  - CPU-only mode also supported (slower)
+- **RAM**: 8GB+ (16GB recommended)
+- **Storage**: ~5GB (models + dependencies)
 
 ---
 
@@ -215,6 +249,22 @@ track_b:
 - Default settings should work on T4
 
 ### Local Issues
+
+**"CUDA not available" or GPU not detected**
+```powershell
+# Check Python version
+python --version  # Should be 3.11.x
+
+# Verify correct virtual environment
+.\venv311\Scripts\Activate.ps1
+
+# Check PyTorch installation
+python -c "import torch; print(torch.__version__); print(torch.version.cuda)"
+
+# Reinstall PyTorch with CUDA if needed
+pip uninstall torch torchvision torchaudio
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+```
 
 **"Model not found"**
 - Check models in: `V4/models/`

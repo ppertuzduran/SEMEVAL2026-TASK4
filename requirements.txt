@@ -1,5 +1,10 @@
-# Core deep learning and transformers
-torch>=2.0.0
+# PyTorch with CUDA support (install separately first)
+# For CUDA 12.1 (RTX 4050): pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+# For CUDA 11.8: pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
+# For CPU only: pip install torch torchvision torchaudio
+# Note: torch should be installed BEFORE running pip install -r requirements.txt
+
+# Core transformers and sentence embeddings
 transformers>=4.35.0
 sentence-transformers>=2.2.2
 
