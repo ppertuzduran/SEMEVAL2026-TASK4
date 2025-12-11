@@ -1,11 +1,17 @@
 """
-Track A system: Cross-encoder for narrative similarity prediction.
+Track A Inference: Cross-encoder for narrative similarity prediction.
 
-This script uses a fine-tuned cross-encoder model to determine which of two stories
-is more narratively similar to an anchor story.
+Google Colab inference script.
+
+This script:
+- Runs ONLY in Google Colab with GPU
+- Loads models from Google Drive
+- Loads data from Google Drive
+- Uses ensemble inference for best accuracy
+- Saves predictions to Google Drive
 """
 
-import random
+import sys
 from pathlib import Path
 from typing import List, Dict
 import pandas as pd
@@ -13,6 +19,10 @@ import torch
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
 import yaml
 from tqdm import tqdm
+
+# Add training directory to path for colab_utils
+sys.path.insert(0, '/content/project/training')
+from colab_utils import is_colab, setup_colab_environment, update_config_for_colab, print_gpu_info
 
 
 def load_config(config_path: str = "config.yaml") -> dict:
@@ -367,101 +377,70 @@ def get_predictor(config: dict):
     return None
 
 
-def predict_with_baseline(df: pd.DataFrame, baseline: str = "random") -> pd.DataFrame:
-    """
-    Fallback baseline prediction.
-    
-    Args:
-        df: Input dataframe
-        baseline: 'random' or 'openai'
-        
-    Returns:
-        DataFrame with predictions
-    """
-    if baseline == "random":
-        print("Using random baseline")
-    elif baseline == "openai":
-        print("OpenAI baseline not implemented in this version")
-        print("Falling back to random baseline")
-    
-    # Apply random baseline
-    df["predicted_text_a_is_closer"] = df.apply(
-        lambda row: random.choice([True, False]), axis=1
-    )
-    
-    return df
-
-
 def main():
-    """Main inference pipeline."""
+    """Main inference pipeline - Google Colab only."""
     import time
-    import os
     start_time = time.time()
     
+    # Check if running in Colab
+    if not is_colab():
+        print("⚠️  This script is designed for Google Colab only!")
+        print("Inference must be run in Colab with GPU enabled.")
+        print("\nPlease:")
+        print("1. Open Google Colab")
+        print("2. Runtime → Change runtime type → T4 GPU")
+        print("3. Run this script")
+        sys.exit(1)
+    
     print("="*60)
-    print("TRACK A INFERENCE - Narrative Similarity Prediction")
+    print("TRACK A INFERENCE - GOOGLE COLAB")
     print("="*60)
     
-    # Clear GPU cache if available
+    # Setup Colab environment
+    colab_paths = setup_colab_environment()
+    print_gpu_info()
+    
+    # Clear GPU cache
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
-        print(f"\n✓ GPU: {torch.cuda.get_device_name(0)}")
-        print(f"✓ GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.2f} GB")
-    else:
-        print("\n⚠ Running on CPU (slower)")
     
-    # Load config first to get data paths
-    config = load_config()
+    # Load and update config with Colab paths
+    print(f"\nLoading configuration...")
+    config = load_config(colab_paths['config_path'])
+    if config is None:
+        print("❌ config.yaml not found!")
+        sys.exit(1)
     
-    # Determine data path (from config or default)
-    if config and 'data' in config:
-        track_a_path = config['data'].get('dev_track_a', 'data/dev_track_a.jsonl')
-        output_dir = Path(config['data'].get('output_dir', 'output'))
-    else:
-        track_a_path = 'data/dev_track_a.jsonl'
-        output_dir = Path('output')
+    config = update_config_for_colab(config, colab_paths)
     
-    # Check if file exists, try alternative paths
-    if not os.path.exists(track_a_path):
-        print(f"\n⚠️  File not found: {track_a_path}")
-        # Try Google Drive path
-        alt_path = '/content/drive/MyDrive/narrative_similarity/data/dev_track_a.jsonl'
-        if os.path.exists(alt_path):
-            print(f"✓ Found file at: {alt_path}")
-            track_a_path = alt_path
-        else:
-            print(f"❌ File not found at alternative path: {alt_path}")
-            print("\nPlease ensure data files are in one of these locations:")
-            print("  - data/dev_track_a.jsonl (local)")
-            print("  - /content/drive/MyDrive/narrative_similarity/data/dev_track_a.jsonl (Colab)")
-            print("\nOr run Cell 7 to update config.yaml with correct paths.")
-            return
+    # Load data from Drive
+    print(f"\nLoading data from Drive...")
+    data_path = config['data']['dev_track_a']
+    df = pd.read_json(data_path, lines=True)
+    print(f"✓ Loaded {len(df)} samples from: {data_path}")
     
-    # Load data
-    print(f"\nLoading data from: {track_a_path}")
-    df = pd.read_json(track_a_path, lines=True)
-    print(f"✓ Loaded {len(df)} samples")
-    
-    # Get predictor
-    print(f"\nInitializing model...")
-    predictor = None
-    if config:
-        predictor = get_predictor(config)
+    # Get predictor from Drive models
+    print(f"\nInitializing model from Drive...")
+    predictor = get_predictor(config)
     
     if predictor:
-        # Use fine-tuned model (reduced batch size for 6GB GPU)
+        # Use fine-tuned model with T4 GPU
         print(f"\nStarting inference...")
         inference_start = time.time()
-        predictions = predictor.predict_batch(df, batch_size=4)
+        # T4 has 16GB VRAM, can use larger batch size than local RTX 4050
+        batch_size = 8  # Increased from 4 for T4 GPU
+        predictions = predictor.predict_batch(df, batch_size=batch_size)
         inference_time = time.time() - inference_start
         print(f"\n✓ Inference completed in {inference_time:.1f} seconds")
         print(f"  ({len(df)/inference_time:.1f} samples/sec)")
         df["predicted_text_a_is_closer"] = predictions
     else:
-        # Fallback to baseline
-        print("\n⚠ Fine-tuned model not found!")
-        print("Falling back to random baseline")
-        df = predict_with_baseline(df, baseline="random")
+        # No model found
+        print("\n❌ Fine-tuned model not found in Drive!")
+        print(f"Expected model at: {config['track_a']['model_save_path']}")
+        print("\nPlease train the model first:")
+        print("  !python training/train_track_a.py")
+        sys.exit(1)
     
     # Calculate accuracy
     accuracy = (df["predicted_text_a_is_closer"] == df["text_a_is_closer"]).mean()
@@ -471,8 +450,9 @@ def main():
     df["text_a_is_closer"] = df["predicted_text_a_is_closer"]
     del df["predicted_text_a_is_closer"]
 
-    # Save results
-    print(f"\nSaving results...")
+    # Save results to Drive
+    print(f"\nSaving results to Drive...")
+    output_dir = Path(config['data']['output_dir'])
     output_dir.mkdir(exist_ok=True, parents=True)
     output_path = output_dir / "track_a.jsonl"
     
@@ -482,6 +462,7 @@ def main():
     total_time = time.time() - start_time
     print(f"\n{'='*60}")
     print(f"✓ Predictions saved to: {output_path}")
+    print(f"✓ Accuracy: {accuracy:.4f}")
     print(f"✓ Total time: {total_time:.1f} seconds ({total_time/60:.1f} minutes)")
     print(f"{'='*60}")
 

@@ -1,11 +1,14 @@
 """
-Track B system: Embedding-based narrative similarity.
+Track B Inference: Embedding-based narrative similarity.
 
-This script embeds texts from Track B file using either:
-1. Fine-tuned bi-encoder model (if available)
-2. Baseline sentence-transformer model
+Google Colab inference script.
 
-The embeddings are evaluated using labels from Track A.
+This script:
+- Runs ONLY in Google Colab with GPU
+- Loads fine-tuned bi-encoder from Google Drive
+- Loads data from Google Drive
+- Generates embeddings and evaluates on Track A
+- Saves embeddings (.npy) to Google Drive
 """
 
 import sys
@@ -16,6 +19,10 @@ from sentence_transformers import SentenceTransformer
 from sentence_transformers.util import cos_sim
 import numpy as np
 import yaml
+
+# Add training directory to path for colab_utils
+sys.path.insert(0, '/content/project/training')
+from colab_utils import is_colab, setup_colab_environment, update_config_for_colab, print_gpu_info
 
 
 def evaluate(labeled_data_path, embedding_lookup):
@@ -49,96 +56,93 @@ def load_config(config_path: str = "config.yaml") -> dict:
         return None
 
 
-def get_model(use_finetuned: bool = True) -> SentenceTransformer:
-    """
-    Load the appropriate model.
-    
-    Args:
-        use_finetuned: If True, attempt to load fine-tuned model
-        
-    Returns:
-        SentenceTransformer model
-    """
-    config = load_config()
-    
-    if use_finetuned and config:
-        model_path = config['track_b']['model_save_path']
-        if Path(model_path).exists():
-            print(f"Loading fine-tuned model from: {model_path}")
-            return SentenceTransformer(model_path)
-        else:
-            print(f"Fine-tuned model not found at {model_path}")
-            print("Falling back to baseline model")
-    
-    # Fallback to baseline
-    baseline_model = "all-MiniLM-L6-v2"
-    if config:
-        baseline_model = config['track_b']['base_model']
-    
-    print(f"Loading baseline model: {baseline_model}")
-    return SentenceTransformer(baseline_model)
-
-
 def main():
-    """Main inference pipeline."""
-    import os
+    """Main inference pipeline - Google Colab only."""
+    import time
+    start_time = time.time()
     
-    # Load config to get data paths
-    config = load_config()
+    # Check if running in Colab
+    if not is_colab():
+        print("⚠️  This script is designed for Google Colab only!")
+        print("Inference must be run in Colab with GPU enabled.")
+        print("\nPlease:")
+        print("1. Open Google Colab")
+        print("2. Runtime → Change runtime type → T4 GPU")
+        print("3. Run this script")
+        sys.exit(1)
     
-    # Determine data paths (from config or default)
-    if config and 'data' in config:
-        track_b_path = config['data'].get('dev_track_b', 'data/dev_track_b.jsonl')
-        track_a_path = config['data'].get('dev_track_a', 'data/dev_track_a.jsonl')
-        output_dir = Path(config['data'].get('output_dir', 'output'))
-    else:
-        track_b_path = 'data/dev_track_b.jsonl'
-        track_a_path = 'data/dev_track_a.jsonl'
-        output_dir = Path('output')
+    print("="*60)
+    print("TRACK B INFERENCE - GOOGLE COLAB")
+    print("="*60)
     
-    # Check if file exists, try alternative paths
-    if not os.path.exists(track_b_path):
-        print(f"⚠️  File not found: {track_b_path}")
-        # Try Google Drive path
-        alt_path = '/content/drive/MyDrive/narrative_similarity/data/dev_track_b.jsonl'
-        if os.path.exists(alt_path):
-            print(f"✓ Found file at: {alt_path}")
-            track_b_path = alt_path
-            track_a_path = '/content/drive/MyDrive/narrative_similarity/data/dev_track_a.jsonl'
-        else:
-            print(f"❌ File not found at alternative path: {alt_path}")
-            print("\nPlease ensure data files are in one of these locations:")
-            print("  - data/dev_track_b.jsonl (local)")
-            print("  - /content/drive/MyDrive/narrative_similarity/data/dev_track_b.jsonl (Colab)")
-            print("\nOr run Cell 7 to update config.yaml with correct paths.")
-            return
+    # Setup Colab environment
+    colab_paths = setup_colab_environment()
+    print_gpu_info()
     
-    # Load data
-    print(f"Loading data from: {track_b_path}")
+    # Load and update config with Colab paths
+    print(f"\nLoading configuration...")
+    config = load_config(colab_paths['config_path'])
+    if config is None:
+        print("❌ config.yaml not found!")
+        sys.exit(1)
+    
+    config = update_config_for_colab(config, colab_paths)
+    
+    # Load data from Drive
+    print(f"\nLoading Track B data from Drive...")
+    track_b_path = config['data']['dev_track_b']
     data = pd.read_json(track_b_path, lines=True)
-    print(f"✓ Loaded {len(data)} texts from Track B")
+    print(f"✓ Loaded {len(data)} texts from: {track_b_path}")
     
-    # Load model (fine-tuned if available, otherwise baseline)
-    model = get_model(use_finetuned=True)
+    # Load fine-tuned model from Drive
+    model_path = config['track_b']['model_save_path']
+    if not Path(model_path).exists():
+        print(f"\n❌ Fine-tuned model not found at: {model_path}")
+        print("\nPlease train the model first:")
+        print("  !python training/train_track_b.py")
+        sys.exit(1)
+    
+    print(f"\nLoading fine-tuned model from Drive...")
+    print(f"  Model: {model_path}")
+    model = SentenceTransformer(model_path)
+    print(f"✓ Model loaded")
     
     # Generate embeddings
-    print("\nGenerating embeddings...")
-    embeddings = model.encode(data["text"], show_progress_bar=True)
+    print(f"\nGenerating embeddings...")
+    inference_start = time.time()
+    embeddings = model.encode(
+        data["text"],
+        show_progress_bar=True,
+        batch_size=32,  # T4 can handle larger batches
+        convert_to_numpy=True
+    )
+    inference_time = time.time() - inference_start
+    print(f"✓ Embeddings generated in {inference_time:.1f} seconds")
+    print(f"  ({len(data)/inference_time:.1f} samples/sec)")
+    print(f"  Shape: {embeddings.shape}")
     
     # Create lookup for evaluation
     embedding_lookup = dict(zip(data["text"], embeddings))
     
-    # Evaluate on Track A
-    print(f"\nEvaluating on Track A dev set: {track_a_path}")
+    # Evaluate on Track A data from Drive
+    print(f"\nEvaluating on Track A dev set...")
+    track_a_path = config['data']['dev_track_a']
     accuracy = evaluate(track_a_path, embedding_lookup)
-    print(f"✓ Accuracy on Track A dev set: {accuracy:.4f}")
+    print(f"✓ Accuracy: {accuracy:.4f}")
     
-    # Save embeddings
+    # Save embeddings to Drive
+    print(f"\nSaving embeddings to Drive...")
+    output_dir = Path(config['data']['output_dir'])
     output_dir.mkdir(exist_ok=True, parents=True)
     output_path = output_dir / "track_b.npy"
     np.save(output_path, embeddings)
-    print(f"\n✓ Embeddings saved to: {output_path}")
-    print(f"✓ Shape: {embeddings.shape}")
+    
+    total_time = time.time() - start_time
+    print(f"\n{'='*60}")
+    print(f"✓ Embeddings saved to: {output_path}")
+    print(f"✓ Accuracy: {accuracy:.4f}")
+    print(f"✓ Total time: {total_time:.1f} seconds ({total_time/60:.1f} minutes)")
+    print(f"{'='*60}")
 
 
 if __name__ == "__main__":
