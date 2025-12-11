@@ -81,6 +81,8 @@ def get_model(use_finetuned: bool = True) -> SentenceTransformer:
 
 def main():
     """Main inference pipeline."""
+    import os
+    
     # Load config to get data paths
     config = load_config()
     
@@ -93,6 +95,23 @@ def main():
         track_b_path = 'data/dev_track_b.jsonl'
         track_a_path = 'data/dev_track_a.jsonl'
         output_dir = Path('output')
+    
+    # Check if file exists, try alternative paths
+    if not os.path.exists(track_b_path):
+        print(f"⚠️  File not found: {track_b_path}")
+        # Try Google Drive path
+        alt_path = '/content/drive/MyDrive/narrative_similarity/data/dev_track_b.jsonl'
+        if os.path.exists(alt_path):
+            print(f"✓ Found file at: {alt_path}")
+            track_b_path = alt_path
+            track_a_path = '/content/drive/MyDrive/narrative_similarity/data/dev_track_a.jsonl'
+        else:
+            print(f"❌ File not found at alternative path: {alt_path}")
+            print("\nPlease ensure data files are in one of these locations:")
+            print("  - data/dev_track_b.jsonl (local)")
+            print("  - /content/drive/MyDrive/narrative_similarity/data/dev_track_b.jsonl (Colab)")
+            print("\nOr run Cell 7 to update config.yaml with correct paths.")
+            return
     
     # Load data
     print(f"Loading data from: {track_b_path}")

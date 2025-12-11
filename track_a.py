@@ -395,6 +395,7 @@ def predict_with_baseline(df: pd.DataFrame, baseline: str = "random") -> pd.Data
 def main():
     """Main inference pipeline."""
     import time
+    import os
     start_time = time.time()
     
     print("="*60)
@@ -419,6 +420,22 @@ def main():
     else:
         track_a_path = 'data/dev_track_a.jsonl'
         output_dir = Path('output')
+    
+    # Check if file exists, try alternative paths
+    if not os.path.exists(track_a_path):
+        print(f"\n⚠️  File not found: {track_a_path}")
+        # Try Google Drive path
+        alt_path = '/content/drive/MyDrive/narrative_similarity/data/dev_track_a.jsonl'
+        if os.path.exists(alt_path):
+            print(f"✓ Found file at: {alt_path}")
+            track_a_path = alt_path
+        else:
+            print(f"❌ File not found at alternative path: {alt_path}")
+            print("\nPlease ensure data files are in one of these locations:")
+            print("  - data/dev_track_a.jsonl (local)")
+            print("  - /content/drive/MyDrive/narrative_similarity/data/dev_track_a.jsonl (Colab)")
+            print("\nOr run Cell 7 to update config.yaml with correct paths.")
+            return
     
     # Load data
     print(f"\nLoading data from: {track_a_path}")

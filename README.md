@@ -120,30 +120,51 @@ paths = setup_colab_environment(project_name="narrative_similarity")
 # === CELL 6: Train Track A (~50 min) ===
 !python training/train_track_a.py
 
-# === CELL 7: Update Config for Inference Paths ===
-# Update config.yaml to point to Drive paths for inference
-import yaml
+# === CELL 7: Verify Data and Update Config ===
+# First, verify data files exist in Drive
+import os
 
-with open('/content/project/config.yaml', 'r') as f:
-    config = yaml.safe_load(f)
+data_dir = '/content/drive/MyDrive/narrative_similarity/data'
+print("Checking for data files...")
+print(f"📁 {data_dir}")
 
-# Update data paths to Google Drive
-config['data']['dev_track_a'] = '/content/drive/MyDrive/narrative_similarity/data/dev_track_a.jsonl'
-config['data']['dev_track_b'] = '/content/drive/MyDrive/narrative_similarity/data/dev_track_b.jsonl'
-config['data']['output_dir'] = '/content/project/output'  # Local temp, will copy to Drive later
+track_a_exists = os.path.exists(f'{data_dir}/dev_track_a.jsonl')
+track_b_exists = os.path.exists(f'{data_dir}/dev_track_b.jsonl')
 
-# Update model paths to Google Drive
-config['track_a']['model_save_path'] = '/content/drive/MyDrive/narrative_similarity/models/track_a_cross_encoder'
-config['track_b']['model_save_path'] = '/content/drive/MyDrive/narrative_similarity/models/track_b_embedder'
+print(f"  {'✓' if track_a_exists else '❌'} dev_track_a.jsonl")
+print(f"  {'✓' if track_b_exists else '❌'} dev_track_b.jsonl")
 
-with open('/content/project/config.yaml', 'w') as f:
-    yaml.dump(config, f, default_flow_style=False)
-
-print("✓ Config updated for inference:")
-print(f"  Data: {config['data']['dev_track_a']}")
-print(f"  Models: {config['track_a']['model_save_path']}")
+if not (track_a_exists and track_b_exists):
+    print("\n❌ ERROR: Data files not found!")
+    print("Please upload data files to Google Drive:")
+    print("  MyDrive/narrative_similarity/data/dev_track_a.jsonl")
+    print("  MyDrive/narrative_similarity/data/dev_track_b.jsonl")
+else:
+    print("\n✓ All data files found!")
+    
+    # Update config.yaml to use Drive paths
+    import yaml
+    
+    with open('/content/project/config.yaml', 'r') as f:
+        config = yaml.safe_load(f)
+    
+    # Update paths
+    config['data']['dev_track_a'] = f'{data_dir}/dev_track_a.jsonl'
+    config['data']['dev_track_b'] = f'{data_dir}/dev_track_b.jsonl'
+    config['data']['output_dir'] = '/content/project/output'
+    config['track_a']['model_save_path'] = '/content/drive/MyDrive/narrative_similarity/models/track_a_cross_encoder'
+    config['track_b']['model_save_path'] = '/content/drive/MyDrive/narrative_similarity/models/track_b_embedder'
+    
+    with open('/content/project/config.yaml', 'w') as f:
+        yaml.dump(config, f, default_flow_style=False)
+    
+    print("✓ Config updated for inference!")
+    print(f"  Data: {config['data']['dev_track_a']}")
+    print(f"  Models: {config['track_a']['model_save_path']}")
 
 # === CELL 8: Run Inference on Colab (RECOMMENDED - Faster than Local) ===
+# ⚠️ IMPORTANT: Only run this AFTER Cell 7 shows "✓ All data files found!"
+
 # Track B Inference (~30 seconds)
 !python track_b.py
 
@@ -182,7 +203,17 @@ files.download('/content/inference_results.zip')
 - **Cell 8:** Inference (~7-9 min)
 - **Cell 9:** Save to Drive (~5 sec)
 
-**⚠️ Important:** Cell 7 updates config.yaml to use Google Drive paths. Without this, inference will fail with "file not found" errors.
+**⚠️ Important:** 
+- Cell 7 verifies data files exist and updates config.yaml
+- Only proceed to Cell 8 if Cell 7 shows "✓ All data files found!"
+- If Cell 7 shows ❌, upload data files to `MyDrive/narrative_similarity/data/` first
+
+**Quick Diagnostic:**
+```python
+# Run this to check your setup before inference
+!ls -lh /content/drive/MyDrive/narrative_similarity/data/
+!ls -lh /content/drive/MyDrive/narrative_similarity/models/
+```
 
 **⚡ Inference Speed:**
 - **Track B:** ~30 seconds (vs. ~2 min local)
@@ -435,6 +466,26 @@ track_b:
 ## 🔧 Troubleshooting
 
 ### Colab Issues
+
+**"ValueError: Expected object or value" during inference**
+
+This means data files aren't found. Check:
+
+```python
+# Run this in Colab to verify data location
+!ls -lh /content/drive/MyDrive/narrative_similarity/data/
+```
+
+Should show:
+```
+dev_track_a.jsonl
+dev_track_b.jsonl
+```
+
+**Fix:**
+1. Ensure data files are uploaded to `MyDrive/narrative_similarity/data/`
+2. Run Cell 7 (config update) BEFORE Cell 8 (inference)
+3. Cell 7 will verify files exist and show ✓ or ❌
 
 **"Session disconnected"**
 - Models auto-save to Drive every epoch
