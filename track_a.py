@@ -287,11 +287,11 @@ def main():
     # Calculate accuracy
     accuracy = (df["predicted_text_a_is_closer"] == df["text_a_is_closer"]).mean()
     print(f"\nAccuracy: {accuracy:.4f}")
-    
+
     # Prepare output
-    df["text_a_is_closer"] = df["predicted_text_a_is_closer"]
-    del df["predicted_text_a_is_closer"]
-    
+df["text_a_is_closer"] = df["predicted_text_a_is_closer"]
+del df["predicted_text_a_is_closer"]
+
     # Save results
     output_dir = Path("output")
     output_dir.mkdir(exist_ok=True)

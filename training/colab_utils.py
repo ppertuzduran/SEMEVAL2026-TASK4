@@ -16,12 +16,16 @@ def is_colab():
         return False
 
 
-def setup_colab_environment(project_name="narrative_similarity"):
+def setup_colab_environment(project_name="narrative_similarity", use_repo=True, repo_url=None):
     """
     Setup Google Colab environment with Drive mounting.
     
+    NEW: Clone from repo (scripts) + Drive (data + models)
+    
     Args:
-        project_name: Name of project folder in Google Drive
+        project_name: Name of project folder in Google Drive (for data/models)
+        use_repo: If True, clone scripts from GitHub repo
+        repo_url: GitHub repo URL (if None, will ask user to provide)
         
     Returns:
         dict: Paths configuration for Colab
@@ -42,65 +46,97 @@ def setup_colab_environment(project_name="narrative_similarity"):
     else:
         print("✓ Drive already mounted")
     
-    # Setup paths
+    # Setup Drive paths for data and models
     drive_project = Path(f"{drive_mount}/MyDrive/{project_name}")
     
-    # Create necessary directories in Drive
+    # Create necessary directories in Drive (only for data/models)
     dirs_to_create = [
         drive_project / "data",
         drive_project / "data/prepared",
         drive_project / "models",
-        drive_project / "output",
-        drive_project / "logs"
+        drive_project / "output"
     ]
     
     for dir_path in dirs_to_create:
         dir_path.mkdir(parents=True, exist_ok=True)
     
-    print(f"✓ Project directory: {drive_project}")
+    print(f"✓ Drive directory: {drive_project}")
     
-    # Check for required files
-    config_file = drive_project / "config.yaml"
+    # Check for required data files in Drive
     data_files = [
         drive_project / "data/dev_track_a.jsonl",
         drive_project / "data/dev_track_b.jsonl"
     ]
     
     missing_files = []
-    if not config_file.exists():
-        missing_files.append("config.yaml")
     for data_file in data_files:
         if not data_file.exists():
             missing_files.append(str(data_file.relative_to(drive_project)))
     
     if missing_files:
-        print("\n⚠️  Missing required files in Google Drive:")
+        print("\n⚠️  Missing required DATA files in Google Drive:")
         for f in missing_files:
             print(f"  - {f}")
-        print(f"\nPlease upload these files to: {drive_project}/")
+        print(f"\nPlease upload data to: {drive_project}/data/")
         print("\nRequired structure:")
         print(f"{project_name}/")
-        print("  ├── config.yaml")
         print("  └── data/")
         print("      ├── dev_track_a.jsonl")
         print("      └── dev_track_b.jsonl")
         sys.exit(1)
     
-    print("✓ All required files found")
+    print("✓ Data files found in Drive")
+    
+    # Clone repository if requested
+    if use_repo:
+        if repo_url is None:
+            print("\n⚠️  No repo URL provided!")
+            print("Please provide repo URL in setup_colab_environment(repo_url='...')")
+            print("Or set use_repo=False to use files from Drive")
+            sys.exit(1)
+        
+        # Clone to /content/project
+        project_dir = Path("/content/project")
+        if project_dir.exists():
+            print("✓ Repository already cloned")
+        else:
+            print(f"📥 Cloning repository from: {repo_url}")
+            os.system(f"git clone {repo_url} /content/project")
+            print("✓ Repository cloned successfully!")
+        
+        # Change to cloned repo directory
+        os.chdir(project_dir)
+        config_path = project_dir / "config.yaml"
+        
+        if not config_path.exists():
+            print(f"\n⚠️  config.yaml not found in repository!")
+            sys.exit(1)
+        
+        print(f"✓ Working directory: {os.getcwd()}")
+        print(f"✓ Config loaded from: {config_path}")
+    else:
+        # Old behavior: use everything from Drive
+        config_path = drive_project / "config.yaml"
+        if not config_path.exists():
+            print(f"\n⚠️  config.yaml not found in Drive!")
+            sys.exit(1)
+        os.chdir(drive_project)
+        project_dir = drive_project
     
     # Return paths configuration
     paths = {
-        'project_root': str(drive_project),
-        'data_dir': str(drive_project / "data"),
-        'models_dir': str(drive_project / "models"),
-        'output_dir': str(drive_project / "output"),
-        'config_path': str(config_file),
-        'prepared_data_dir': str(drive_project / "data/prepared")
+        'project_root': str(project_dir),
+        'data_dir': str(drive_project / "data"),  # Always from Drive
+        'models_dir': str(drive_project / "models"),  # Always to Drive
+        'output_dir': str(drive_project / "output"),  # Always to Drive
+        'config_path': str(config_path),  # From repo or Drive
+        'prepared_data_dir': str(drive_project / "data/prepared")  # Always to Drive
     }
     
-    # Change to project directory
-    os.chdir(drive_project)
-    print(f"✓ Changed to project directory: {os.getcwd()}")
+    print(f"✓ Setup complete!")
+    print(f"  - Scripts: {paths['project_root']}")
+    print(f"  - Data: {paths['data_dir']}")
+    print(f"  - Models: {paths['models_dir']}")
     
     return paths
 
