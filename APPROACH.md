@@ -99,6 +99,8 @@ L = -log(softmax([sim_A, sim_B])[y])
 
 ### 3. Multi-Phase Training Strategy
 
+**Implementation Note**: The training uses **sequential phases**, not combined weighted losses. Each phase trains independently, loading the best model from the previous phase.
+
 **Phase 1: Pairwise Softmax** (Direct Metric Optimization)
 - Optimizes exactly what will be evaluated
 - Establishes task-specific similarity structure
@@ -110,6 +112,7 @@ L = max(0, d(anchor, pos) - d(anchor, neg) + margin)
 - Refines embedding geometry
 - Hard negative focus
 - Improves discriminative power
+- Lower learning rate (halved) and warmup steps (halved) for stability
 
 **Phase 3: Multiple Negatives Ranking Loss** (Contrastive Learning)
 ```
@@ -118,6 +121,7 @@ L = -log(exp(sim_pos) / Σ_i exp(sim_neg_i))
 - In-batch negatives as hard negatives
 - Scales efficiently with batch size
 - Further separates similar/dissimilar pairs
+- Continues with reduced learning rate and warmup steps
 
 **Technique**: Progressive curriculum from task-specific to representation-quality objectives
 
@@ -324,7 +328,7 @@ Learning Rate: 1e-5
 Weight Decay: 0.01
 Warmup Steps: 100
 Batch Size: 24 (reduced from 32 for larger model)
-Epochs: 10 (split across phases)
+Base Epochs: 10 (from config, but split across phases results in 15 total)
 Gradient Clipping: 1.0
 Mixed Precision: FP16
 ```
@@ -332,20 +336,25 @@ Mixed Precision: FP16
 **Multi-Phase Training Schedule**:
 ```yaml
 Phase 1 (Pairwise Softmax):
-  Epochs: 5
+  Epochs: 5 (num_epochs // 2)
   Learning Rate: 1e-5
+  Warmup Steps: 100
   Objective: Direct metric optimization
 
 Phase 2 (TripletLoss):
-  Epochs: 5
+  Epochs: 5 (num_epochs // 2)
   Learning Rate: 5e-6 (halved for stability)
+  Warmup Steps: 50 (halved)
   Triplet Margin: 0.5
   Distance Metric: Cosine
 
 Phase 3 (MNR - Optional):
-  Epochs: 5 (if enabled)
+  Epochs: 5 (num_epochs // 2, if enabled)
   Learning Rate: 5e-6
+  Warmup Steps: 50 (halved)
   In-Batch Negatives: 23 (batch_size - 1)
+
+Total Training Epochs: 15 (when all phases enabled)
 ```
 
 **Data Split**:
@@ -362,10 +371,10 @@ Evaluation: Track A dev set (200 samples)
 - **Model Saving**: Only best checkpoint retained
 
 **Training Time** (RTX 4050, 6GB):
-- Phase 1: ~12-15 minutes
-- Phase 2: ~12-15 minutes
-- Phase 3: ~12-15 minutes (if enabled)
-- Total: ~30-45 minutes
+- Phase 1: ~12-15 minutes (5 epochs)
+- Phase 2: ~12-15 minutes (5 epochs)
+- Phase 3: ~12-15 minutes (5 epochs, if enabled)
+- Total: ~36-45 minutes (15 total epochs when all phases enabled)
 
 ### Inference Implementation
 
@@ -441,8 +450,8 @@ Random Seed: 42
   - CUDA torch.cuda.manual_seed_all(42)
 
 Deterministic Operations:
-  - torch.backends.cudnn.deterministic = False (for speed)
-  - torch.backends.cudnn.benchmark = True (auto-tune)
+  - cudnn settings: Not explicitly set (uses PyTorch defaults)
+  - Note: Full reproducibility not enforced for performance reasons
 
 Version Pinning:
   - transformers >= 4.35.0

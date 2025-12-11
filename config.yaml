@@ -27,16 +27,11 @@ track_b:
   triplet_margin: 0.5
   use_multiple_negatives_ranking: true
   use_pairwise_softmax: true  # NEW: Direct triple-wise optimization
-  loss_weights:
-    triplet: 0.3
-    mnr: 0.3
-    pairwise: 0.4  # Prioritize pairwise softmax
   
   # Training options
   mixed_precision: true
   gradient_clip: 1.0
   eval_steps: 100
-  save_best_only: true
 
 # Track A - Cross-encoder settings
 track_a:
@@ -64,19 +59,9 @@ track_a:
   
   # Ensemble settings (optional)
   use_ensemble: false
-  ensemble_strategy: "average"  # average or vote
-  
-  # NEW: Pairwise scoring architecture
-  pairwise_scoring: true  # Score (anchor, A) and (anchor, B) separately
 
 # Data augmentation
 augmentation:
   enable: true
   swap_ab: true
-  word_drop_rate: 0.0  # 0.0 to disable
-
-# Evaluation
-evaluation:
-  metrics: ["accuracy"]
-  save_predictions: true
 

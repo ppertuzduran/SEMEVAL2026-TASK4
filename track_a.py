@@ -241,12 +241,11 @@ def predict_with_baseline(df: pd.DataFrame, baseline: str = "random") -> pd.Data
     """
     if baseline == "random":
         print("Using random baseline")
-        df["predicted_text_a_is_closer"] = df.apply(
-            lambda row: random.choice([True, False]), axis=1
-        )
     elif baseline == "openai":
         print("OpenAI baseline not implemented in this version")
         print("Falling back to random baseline")
+    
+    # Apply random baseline
     df["predicted_text_a_is_closer"] = df.apply(
         lambda row: random.choice([True, False]), axis=1
     )
@@ -289,8 +288,8 @@ def main():
     print(f"\nAccuracy: {accuracy:.4f}")
 
     # Prepare output
-df["text_a_is_closer"] = df["predicted_text_a_is_closer"]
-del df["predicted_text_a_is_closer"]
+    df["text_a_is_closer"] = df["predicted_text_a_is_closer"]
+    del df["predicted_text_a_is_closer"]
 
     # Save results
     output_dir = Path("output")
