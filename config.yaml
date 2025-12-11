@@ -1,4 +1,7 @@
 # Configuration for Narrative Similarity Training
+#
+# This configuration implements recommendations from APPROACH.md
+# See APPROACH.md for detailed explanation of each technique and parameter
 
 # General settings
 seed: 42
@@ -13,20 +16,22 @@ data:
 
 # Track B - Bi-encoder settings
 track_b:
-  base_model: "BAAI/bge-base-en-v1.5"  # 109M params, 768-dim embeddings. BGE outperforms MiniLM and base sentence-transformers
+  base_model: "BAAI/bge-base-en-v1.5"  # Options: BAAI/bge-base-en-v1.5, BAAI/bge-large-en-v1.5, intfloat/e5-large-v2
+  # RECOMMENDED: Upgrade to bge-large-en-v1.5 for better quality (1024-dim, reduce batch_size to 16)
   model_save_path: "models/track_b_embedder"
   
   # Training hyperparameters
-  batch_size: 24  # Optimal for 6GB GPU, increase to 32 on Colab T4 (16GB)
-  epochs: 10
-  learning_rate: 1.0e-5  # Lower LR for fine-tuning BGE
+  batch_size: 24  # For base model. Use 16 for large model
+  epochs: 10  # Total epochs split across phases
+  learning_rate: 1.0e-5  # Lower LR for fine-tuning pretrained embedders
   warmup_steps: 100
   weight_decay: 0.01
   
   # Loss configuration
-  triplet_margin: 0.5
-  use_multiple_negatives_ranking: true
-  use_pairwise_softmax: true  # Direct metric optimization (Phase 1)
+  triplet_margin: 0.5  # Margin for TripletLoss
+  use_multiple_negatives_ranking: true  # Enable MNR loss phase
+  use_pairwise_softmax: true  # Enable pairwise softmax loss phase (direct metric optimization)
+  temperature: 1.0  # Temperature for pairwise softmax (< 1.0 sharpens gradients)
   
   # Training options
   mixed_precision: true
@@ -35,7 +40,7 @@ track_b:
 
 # Track A - Cross-encoder settings
 track_a:
-  base_model: "roberta-large"  # 355M params, proven performance on narrative similarity
+  base_model: "roberta-large"  # Options: roberta-large, microsoft/deberta-v3-large, roberta-base
   model_save_path: "models/track_a_cross_encoder"
   
   # Training hyperparameters
@@ -46,9 +51,10 @@ track_a:
   weight_decay: 0.01
   
   # Model configuration
-  max_length: 512  # RoBERTa max length (per pair)
+  max_length: 512  # RoBERTa max length (per pair). Can increase to 768-1024 for long stories
   num_labels: 2
-  label_smoothing: 0.0  # No smoothing for better signal in pairwise task
+  label_smoothing: 0.0  # Keep at 0.0 for binary pairwise task
+  temperature: 1.0  # Temperature scaling for loss (< 1.0 sharpens, try 0.5-0.7)
   
   # Training options
   mixed_precision: true
@@ -57,10 +63,12 @@ track_a:
   use_kfold: true
   n_folds: 5
   
-  # Ensemble settings (optional)
-  use_ensemble: false
+  # Ensemble settings - RECOMMENDED: Enable for 1-3% accuracy boost
+  use_ensemble: true  # Use k-fold models as ensemble at inference
+  ensemble_method: "average"  # Options: "average" (logits), "vote" (predictions)
 
 # Data augmentation
 augmentation:
-  swap_ab: true  # Systematic A/B position swap (doubles training data, removes position bias)
+  enable: true
+  swap_ab: true
 

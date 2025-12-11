@@ -164,20 +164,73 @@ class CrossEncoderPredictor:
 
 
 class EnsemblePredictor:
-    """Ensemble of multiple cross-encoder models."""
+    """
+    Ensemble of multiple cross-encoder models.
     
-    def __init__(self, model_paths: List[str], device: str = None):
-        """Initialize ensemble with multiple models."""
+    As recommended in APPROACH.md section 3.4:
+    - Loads all k-fold models
+    - Aggregates predictions via averaging or voting
+    - Typically yields 1-3% accuracy improvement
+    """
+    
+    def __init__(self, model_paths: List[str], device: str = None, method: str = "average"):
+        """
+        Initialize ensemble with multiple models.
+        
+        Args:
+            model_paths: Paths to fold models
+            device: Device to use
+            method: "average" (average logits) or "vote" (majority vote)
+        """
         self.device = device if device else ('cuda' if torch.cuda.is_available() else 'cpu')
+        self.method = method
         self.models = []
         
-        for path in model_paths:
-            print(f"Loading model: {path}")
+        print(f"Initializing ensemble with {len(model_paths)} models (method: {method})")
+        for i, path in enumerate(model_paths):
+            print(f"  Loading fold {i}: {path}")
             predictor = CrossEncoderPredictor(path, device=self.device)
             self.models.append(predictor)
     
-    def predict_batch(self, df: pd.DataFrame, batch_size: int = 8) -> List[bool]:
-        """Predict using ensemble (majority vote)."""
+    def predict_batch(self, df: pd.DataFrame, batch_size: int = 4) -> List[bool]:
+        """
+        Predict using ensemble.
+        
+        Method options:
+        - "average": Average logits across models (recommended)
+        - "vote": Majority vote on predictions
+        """
+        if self.method == "average":
+            return self._predict_average(df, batch_size)
+        else:
+            return self._predict_vote(df, batch_size)
+    
+    def _predict_average(self, df: pd.DataFrame, batch_size: int) -> List[bool]:
+        """Average logits across models (better calibration)."""
+        all_scores_a = []
+        all_scores_b = []
+        
+        for i, predictor in enumerate(self.models):
+            print(f"\nModel {i+1}/{len(self.models)} predictions:")
+            # Get raw scores for this model
+            scores_a, scores_b = self._get_raw_scores(predictor, df, batch_size)
+            all_scores_a.append(scores_a)
+            all_scores_b.append(scores_b)
+            
+            # Clear memory between models
+            if predictor.device == 'cuda':
+                torch.cuda.empty_cache()
+        
+        # Average scores across models
+        avg_scores_a = torch.tensor(all_scores_a).mean(dim=0)
+        avg_scores_b = torch.tensor(all_scores_b).mean(dim=0)
+        
+        # Predict based on averaged scores
+        predictions = (avg_scores_a > avg_scores_b).cpu().numpy()
+        return [bool(p) for p in predictions]
+    
+    def _predict_vote(self, df: pd.DataFrame, batch_size: int) -> List[bool]:
+        """Majority vote on predictions."""
         all_predictions = []
         
         for i, predictor in enumerate(self.models):
@@ -194,35 +247,109 @@ class EnsemblePredictor:
         ensemble_predictions = (all_predictions.mean(dim=0) > 0.5).cpu().numpy()
         
         return [bool(p) for p in ensemble_predictions]
+    
+    def _get_raw_scores(self, predictor: CrossEncoderPredictor, df: pd.DataFrame, batch_size: int) -> tuple:
+        """Get raw scores (logits) from a predictor."""
+        scores_a_list = []
+        scores_b_list = []
+        
+        for i in range(0, len(df), batch_size):
+            batch = df.iloc[i:i+batch_size]
+            
+            # Prepare pair texts
+            texts_a = []
+            texts_b = []
+            for _, row in batch.iterrows():
+                text_a = f"{row['anchor_text']} {predictor.tokenizer.sep_token} {row['text_a']}"
+                text_b = f"{row['anchor_text']} {predictor.tokenizer.sep_token} {row['text_b']}"
+                texts_a.append(text_a)
+                texts_b.append(text_b)
+            
+            # Tokenize and score batch A
+            inputs_a = predictor.tokenizer(
+                texts_a,
+                max_length=512,
+                padding='max_length',
+                truncation=True,
+                return_tensors='pt'
+            )
+            inputs_a = {k: v.to(predictor.device) for k, v in inputs_a.items()}
+            
+            with torch.no_grad():
+                outputs_a = predictor.model(**inputs_a)
+                scores_a = outputs_a.logits[:, 1].cpu()  # Positive class logit
+            
+            # Clear memory
+            if predictor.device == 'cuda':
+                del inputs_a, outputs_a
+                torch.cuda.empty_cache()
+            
+            # Tokenize and score batch B
+            inputs_b = predictor.tokenizer(
+                texts_b,
+                max_length=512,
+                padding='max_length',
+                truncation=True,
+                return_tensors='pt'
+            )
+            inputs_b = {k: v.to(predictor.device) for k, v in inputs_b.items()}
+            
+            with torch.no_grad():
+                outputs_b = predictor.model(**inputs_b)
+                scores_b = outputs_b.logits[:, 1].cpu()  # Positive class logit
+            
+            # Clear memory
+            if predictor.device == 'cuda':
+                del inputs_b, outputs_b
+                torch.cuda.empty_cache()
+            
+            scores_a_list.append(scores_a)
+            scores_b_list.append(scores_b)
+        
+        return torch.cat(scores_a_list), torch.cat(scores_b_list)
 
 
 def get_predictor(config: dict):
     """
     Get the appropriate predictor based on configuration.
+    
+    As per APPROACH.md section 3.4:
+    - If use_ensemble=true, loads all k-fold models and ensembles them
+    - Otherwise uses single model or fold 0 as fallback
 
     Returns:
         Predictor instance or None if no model found
     """
     model_path = config['track_a']['model_save_path']
     
-    # Check if we should use ensemble
+    # Check if we should use ensemble (RECOMMENDED in APPROACH.md)
     if config['track_a'].get('use_ensemble', False):
         # Find all fold models
         model_dir = Path(model_path).parent
         fold_models = sorted(model_dir.glob(f"{Path(model_path).name}_fold*"))
         
         if fold_models:
-            print(f"Using ensemble of {len(fold_models)} models")
-            return EnsemblePredictor([str(p) for p in fold_models])
+            ensemble_method = config['track_a'].get('ensemble_method', 'average')
+            print(f"\n{'='*60}")
+            print(f"ENSEMBLE MODE: {len(fold_models)} models (method: {ensemble_method})")
+            print(f"{'='*60}")
+            return EnsemblePredictor(
+                [str(p) for p in fold_models],
+                method=ensemble_method
+            )
+        else:
+            print("Warning: use_ensemble=true but no fold models found!")
+            print("Falling back to single model...")
     
     # Single model
     if Path(model_path).exists():
+        print(f"Using single model: {model_path}")
         return CrossEncoderPredictor(model_path)
     
     # Check for fold 0 model as fallback
     fold0_path = model_path + "_fold0"
     if Path(fold0_path).exists():
-        print("Using fold 0 model")
+        print(f"Using fold 0 model: {fold0_path}")
         return CrossEncoderPredictor(fold0_path)
     
     return None

@@ -3,12 +3,14 @@ Training script for Track A: Cross-encoder model.
 
 Google Colab training script.
 
-This script:
-- Loads a transformer model (RoBERTa-large, etc.)
-- Trains using pairwise scoring architecture
-- Uses k-fold cross-validation
+This script implements recommendations from APPROACH.md:
+- Pairwise scoring architecture (section 3.1)
+- Temperature scaling for loss calibration (section 3.2.1)
+- A/B swap augmentation for position invariance (section 3.2.2)
+- K-fold cross-validation for robust evaluation (section 3.4)
 - Mixed precision training (FP16)
-- Saves models to Google Drive
+- Models support: RoBERTa-large, DeBERTa-v3-large (section 3.1)
+- Saves models to Google Drive for ensemble inference (section 3.4)
 """
 
 import json
@@ -108,12 +110,15 @@ def load_cross_encoder_data(path: str) -> List[Dict]:
     return data
 
 
-def train_epoch(model, dataloader, optimizer, scheduler, device, use_amp=True, clip_value=1.0, label_smoothing=0.0):
+def train_epoch(model, dataloader, optimizer, scheduler, device, use_amp=True, clip_value=1.0, label_smoothing=0.0, temperature=1.0):
     """
     Train for one epoch with pairwise scoring.
     
     NEW APPROACH: Score (anchor, A) and (anchor, B) separately,
-    then apply softmax cross-entropy loss.
+    then apply softmax cross-entropy loss with temperature scaling.
+    
+    Args:
+        temperature: Temperature for scaling logits. < 1.0 sharpens distribution (e.g. 0.5-0.7)
     """
     model.train()
     total_loss = 0
@@ -150,8 +155,10 @@ def train_epoch(model, dataloader, optimizer, scheduler, device, use_amp=True, c
                 )
                 score_b = outputs_b.logits[:, 1]  # Take positive class logit as score
                 
-                # Stack scores and apply softmax cross-entropy
+                # Stack scores and apply temperature scaling
                 scores = torch.stack([score_a, score_b], dim=1)  # Shape: (batch, 2)
+                scores = scores / temperature  # Temperature scaling: < 1.0 sharpens distribution
+                
                 # Label: 1 if A is closer (index 0), 0 if B is closer (index 1)
                 # Need to invert: if label=1, target should be index 0 (score_a)
                 targets = (1 - labels).long()  # Invert: 1→0, 0→1
@@ -178,8 +185,9 @@ def train_epoch(model, dataloader, optimizer, scheduler, device, use_amp=True, c
             )
             score_b = outputs_b.logits[:, 1]
             
-            # Compute loss
+            # Compute loss with temperature scaling
             scores = torch.stack([score_a, score_b], dim=1)
+            scores = scores / temperature  # Temperature scaling
             targets = (1 - labels).long()
             loss = loss_fn(scores, targets)
             
@@ -203,8 +211,8 @@ def train_epoch(model, dataloader, optimizer, scheduler, device, use_amp=True, c
 
 
 @torch.no_grad()
-def evaluate(model, dataloader, device, label_smoothing=0.0):
-    """Evaluate the model with pairwise scoring."""
+def evaluate(model, dataloader, device, label_smoothing=0.0, temperature=1.0):
+    """Evaluate the model with pairwise scoring and temperature scaling."""
     model.eval()
     total_loss = 0
     correct = 0
@@ -234,8 +242,9 @@ def evaluate(model, dataloader, device, label_smoothing=0.0):
         )
         score_b = outputs_b.logits[:, 1]
         
-        # Compute loss and predictions
+        # Compute loss and predictions with temperature scaling
         scores = torch.stack([score_a, score_b], dim=1)
+        scores = scores / temperature  # Temperature scaling
         targets = (1 - labels).long()
         loss = loss_fn(scores, targets)
         
@@ -352,7 +361,8 @@ def train_single_model(
             device,
             use_amp=config['track_a']['mixed_precision'],
             clip_value=config['track_a']['gradient_clip'],
-            label_smoothing=config['track_a'].get('label_smoothing', 0.0)
+            label_smoothing=config['track_a'].get('label_smoothing', 0.0),
+            temperature=config['track_a'].get('temperature', 1.0)
         )
         
         # Evaluate
@@ -360,7 +370,8 @@ def train_single_model(
             model, 
             val_loader, 
             device,
-            label_smoothing=config['track_a'].get('label_smoothing', 0.0)
+            label_smoothing=config['track_a'].get('label_smoothing', 0.0),
+            temperature=config['track_a'].get('temperature', 1.0)
         )
         
         print(f"Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f}")

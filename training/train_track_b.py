@@ -3,10 +3,14 @@ Training script for Track B: Bi-encoder (embedding model).
 
 Google Colab training script.
 
-Uses sentence-transformers with:
-- Pairwise Softmax Loss (direct metric optimization)
-- TripletLoss (margin-based metric learning)
-- MultipleNegativesRankingLoss (contrastive learning)
+This script implements recommendations from APPROACH.md:
+- Multi-phase training curriculum (section 4.2):
+  * Phase 1: Pairwise Softmax Loss (direct metric optimization)
+  * Phase 2: TripletLoss (margin-based metric learning)
+  * Phase 3: MultipleNegativesRankingLoss (contrastive learning)
+- Temperature scaling for gradient sharpening (section 4.1.2)
+- Support for BGE-base and BGE-large models (section 4.1)
+- L2 normalization of embeddings (section 4.1.2)
 - Mixed precision training (FP16)
 - Saves models to Google Drive
 """
@@ -87,19 +91,22 @@ def create_pair_examples(pairs: list) -> list:
 
 class PairwiseSoftmaxLoss(nn.Module):
     """
-    NEW: Direct triple-wise pairwise softmax loss.
+    NEW: Direct triple-wise pairwise softmax loss with temperature scaling.
     
     Directly optimizes the evaluation metric by:
     1. Encoding anchor, text_a, text_b independently
     2. Computing cosine similarities
-    3. Applying softmax cross-entropy
+    3. Applying temperature scaling
+    4. Applying softmax cross-entropy
     
     This aligns training with the triple-wise evaluation.
+    Temperature < 1.0 sharpens the distribution and improves gradient flow.
     """
     
-    def __init__(self, model: SentenceTransformer):
+    def __init__(self, model: SentenceTransformer, temperature: float = 1.0):
         super(PairwiseSoftmaxLoss, self).__init__()
         self.model = model
+        self.temperature = temperature
         self.loss_fn = nn.CrossEntropyLoss()
     
     def forward(self, sentence_features, labels):
@@ -118,8 +125,9 @@ class PairwiseSoftmaxLoss(nn.Module):
         sim_a = F.cosine_similarity(anchor_emb, a_emb, dim=1)  # (batch,)
         sim_b = F.cosine_similarity(anchor_emb, b_emb, dim=1)  # (batch,)
         
-        # Stack similarities and apply softmax
+        # Stack similarities and apply temperature scaling
         scores = torch.stack([sim_a, sim_b], dim=1)  # (batch, 2)
+        scores = scores / self.temperature  # Temperature scaling: < 1.0 sharpens gradients
         
         # Convert labels: 1 → index 0 (A closer), 0 → index 1 (B closer)
         targets = (1 - labels).long()
@@ -312,7 +320,10 @@ def main():
     
     mnr_loss = losses.MultipleNegativesRankingLoss(model=model)
     
-    pairwise_softmax_loss = PairwiseSoftmaxLoss(model=model)
+    pairwise_softmax_loss = PairwiseSoftmaxLoss(
+        model=model,
+        temperature=config['track_b'].get('temperature', 1.0)
+    )
     
     # Training parameters
     num_epochs = config['track_b']['epochs']

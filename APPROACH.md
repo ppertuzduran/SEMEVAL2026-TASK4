@@ -1,354 +1,271 @@
-# Technical Approach for Narrative Similarity Competition (Tracks A & B)
+# Improved Approach for Narrative Similarity Competition (Tracks A & B)
 
-This document describes the **implemented approach** for the narrative similarity task, covering both Track A (classification) and Track B (embeddings).
-
----
-
-## 1. Task Overview
-
-### Track A (Classification)
-- **Input**: `(anchor_story, choice_A, choice_B)`
-- **Output**: Prediction of which story (A or B) is more narratively similar to the anchor
-- **Metric**: Accuracy on triple-wise comparisons
-- **Model**: Cross-encoder with pairwise scoring
-
-### Track B (Embeddings)
-- **Input**: Individual stories
-- **Output**: Vector embeddings (768-dimensional) whose cosine similarity reflects narrative similarity
-- **Metric**: Triple-wise accuracy derived from cosine comparison
-- **Constraint**: Embeddings must be computed per story independently (no triple-aware embeddings at inference)
-- **Model**: Bi-encoder with metric learning
+This document refines the existing approach and outlines **next-step, higher-impact improvements** to push accuracy beyond the current implementation. It assumes the current codebase described in the previous `APPROACH.md` and training scripts for Track A and Track B, and focuses on **modeling and training strategy changes**, not code-level details.
 
 ---
 
-## 2. Track A: Cross-Encoder Implementation
+## 1. Task Recap and Constraints
 
-### 2.1. Model Architecture
+- **Track A (Classification)**  
+  Input: `(anchor_story, choice_A, choice_B)`  
+  Output: which of A or B is more narratively similar to the anchor.  
+  Metric: accuracy on triple-wise comparisons.
 
-**Base Model**: `roberta-large` (355M parameters)
+- **Track B (Embeddings)**  
+  Input: individual stories.  
+  Output: vector embeddings (dimension 10–8192) whose **cosine similarity** reflects narrative similarity.  
+  Evaluation: triple-wise accuracy derived from cosine comparison (similar to Track A).  
+  Constraint: At **inference**, embeddings must be computed per story independently (no triple-aware embeddings at inference time).
 
-**Pairwise Scoring Architecture**:
-- For each triple `(anchor, A, B)`, score two pairs independently:
-  - Pair 1: `[CLS] anchor [SEP] text_a [SEP]`
-  - Pair 2: `[CLS] anchor [SEP] text_b [SEP]`
-- Extract positive class logit from each pair as similarity score
-- Stack scores: `[score_a, score_b]`
-- Apply softmax + cross-entropy loss
+The current system already applies strong ideas:
+- Track A: **RoBERTa-large cross-encoder** with pairwise scoring and k-fold training. fileciteturn0file0  
+- Track B: **BGE-base bi-encoder** with a curriculum of Pairwise Softmax → TripletLoss → MultipleNegativesRankingLoss. fileciteturn0file0  
 
-**Why Pairwise Scoring?**
-- More stable than concatenating all three texts
-- Aligns with information retrieval best practices
-- Each pair gets full attention from the model
-- Standard approach in cross-encoder reranking (Nogueira & Cho, 2020)
-
-### 2.2. Training Configuration
-
-```yaml
-Base Model: roberta-large
-Max Length: 512 tokens per pair
-Optimizer: AdamW
-Learning Rate: 1e-5
-Weight Decay: 0.01
-Warmup Ratio: 0.1 (10% of training steps)
-Batch Size: 6
-Epochs: 5
-Mixed Precision: FP16
-Gradient Clipping: 1.0
-Label Smoothing: 0.0
-```
-
-### 2.3. K-Fold Cross-Validation
-
-- **Strategy**: 5-fold cross-validation
-- **Purpose**: Robust model evaluation and preparation for ensemble
-- **Implementation**:
-  - Data split into 5 stratified folds
-  - Each fold trains a separate model
-  - Models saved independently: `track_a_cross_encoder_fold0`, `fold1`, etc.
-- **Early Stopping**: Patience of 3 epochs based on validation accuracy
-
-### 2.4. Data Augmentation
-
-**A/B Position Swap**:
-- For each original triple `(anchor, A, B, label=1 if A closer)`:
-- Create augmented triple `(anchor, B, A, label=0 if A closer)`
-- **Effect**: Doubles training data and removes position bias
-
-### 2.5. Inference Options
-
-**Single Model**:
-- Use best model from fold 0 or specified fold
-- Fast inference
-
-**Ensemble** (Optional):
-- Load all K fold models
-- For each triple, compute scores from all models
-- Average predictions (majority vote)
-- **Expected gain**: 1-3 points accuracy improvement
-- **Config setting**: `use_ensemble: true/false`
+The goal here is to move closer to **state-of-the-art (SOTA)** for semantic similarity / retrieval with **minimal code churn** but **maximum gain per change**.
 
 ---
 
-## 3. Track B: Bi-Encoder Implementation
+## 2. High-Level Strategy
 
-### 3.1. Model Architecture
+1. **Exploit stronger base models** where allowed by compute:
+   - Upgrading from base → large encoders when feasible.
+   - Consider more recent architectures (DeBERTa-v3, ModernBERT, newer BGE/GTE variants).
 
-**Base Model**: `BAAI/bge-base-en-v1.5`
-- 109M parameters
-- 768-dimensional embeddings
-- CLS token pooling
-- L2 normalization (implicit in model)
+2. **Tighten alignment between training objectives and evaluation:**
+   - Track A: keep pairwise scoring, but improve regularization, sampling, and ensembling.
+   - Track B: keep triple-wise optimization, but improve hard-negative mining and curriculum.
 
-**Why BGE?**
-- State-of-the-art English embedding model (Xiao et al., 2023)
-- Pre-trained on large-scale text pairs
-- Superior to MiniLM and base sentence-transformers
+3. **Use ensembling and cross-validation more aggressively:**
+   - Exploit the existing k-fold infrastructure in Track A for **model averaging at inference**.
+   - Introduce analogous data-splitting and ensembling logic for Track B embeddings.
 
-### 3.2. Multi-Phase Training Curriculum
+4. **Better negatives and augmentations:**
+   - Leverage the track data itself to build **hard negatives** for both tracks.
+   - Use symmetric transformations and light textual augmentations for robustness.
 
-Training proceeds in **3 sequential phases**, each optimizing a different objective:
-
-#### Phase 1: PairwiseSoftmaxLoss (Epochs 1-5)
-- **Purpose**: Direct optimization of evaluation metric
-- **Input**: Triples `(anchor, text_a, text_b, label)`
-- **Loss**:
-  ```python
-  sim_a = cosine(anchor_emb, a_emb)
-  sim_b = cosine(anchor_emb, b_emb)
-  scores = [sim_a, sim_b]
-  loss = CrossEntropy(scores, target)
-  ```
-- **Why first?**: Aligns embedding space directly with task objective
-
-#### Phase 2: TripletLoss (Epochs 6-10)
-- **Purpose**: Enforce margin-based separation
-- **Input**: Triplets `(anchor, positive, negative)`
-- **Loss**: `max(0, margin + dist(a,p) - dist(a,n))`
-- **Margin**: 0.5
-- **Distance**: Cosine distance
-- **Learning Rate**: Halved to 5e-6 for stability
-- **Why second?**: Refines embedding quality without overriding metric-aligned structure
-
-#### Phase 3: MultipleNegativesRankingLoss (Epochs 11-15, Optional)
-- **Purpose**: In-batch contrastive learning
-- **Input**: Positive pairs `(anchor, positive)`
-- **Negatives**: Other positives in batch (batch_size - 1 = 23 negatives)
-- **Loss**: InfoNCE-style contrastive loss
-- **Why last?**: Global space shaping without task-specific overfitting
-
-### 3.3. Training Configuration
-
-```yaml
-Base Model: BAAI/bge-base-en-v1.5
-Optimizer: AdamW
-Learning Rate: 1e-5 (Phase 1), 5e-6 (Phases 2-3)
-Weight Decay: 0.01
-Warmup Steps: 100 (Phase 1), 50 (Phases 2-3)
-Batch Size: 24
-Total Epochs: 15 (5 per phase, 10 if MNR disabled)
-Mixed Precision: FP16
-Gradient Clipping: 1.0
-```
-
-### 3.4. Data Pipeline
-
-- **Train/Val Split**: 80/20 (160 train, 40 val samples)
-- **Evaluation**: Continuous monitoring on Track A dev set
-- **Best Model Selection**: Highest accuracy on Track A triples
-- **Checkpoint Strategy**: Save only best model per phase
-
-### 3.5. Inference
-
-- Single forward pass per story
-- Output: (N, 768) embedding matrix
-- Cosine similarity for pairwise comparison
-- No ensemble (embeddings are story-independent)
+5. **Guard against overfitting on small data:**
+   - Calibrated regularization, early stopping, and cross-validation.
+   - Avoid leaking dev set signal in Track B when using Track A triples to evaluate.
 
 ---
 
-## 4. Key Technical Decisions
+## 3. Track A – Cross-Encoder Improvements
 
-### 4.1. Mixed Precision Training (FP16)
+### 3.1. Model Architecture and Base Encoder
 
-- **Implementation**: PyTorch Automatic Mixed Precision (AMP)
-- **Benefits**:
-  - 2x memory reduction
-  - 1.5-2x training speedup
-  - Minimal accuracy impact
-- **Techniques**:
-  - Forward/backward in float16
-  - Master weights in float32
-  - Gradient scaling for numerical stability
+**Current:** RoBERTa-large cross-encoder with pairwise scoring and softmax over `[score_A, score_B]`. fileciteturn0file0turn0file1  
 
-### 4.2. Learning Rate Scheduling
+**Recommended upgrades (prioritized):**
 
-**Track A**:
-- Linear warmup (10% of steps)
-- Linear decay to 0
-- **Why?**: Standard Transformer fine-tuning practice (Vaswani et al., 2017)
+1. **Try a stronger encoder**:
+   - **DeBERTa-v3-large** or **modern long-context LMs** (e.g., Longformer/ModernBERT) if story lengths are close to or exceed 512 tokens.
+   - Keep the same pairwise architecture: `encode(anchor ⊕ SEP ⊕ candidate)`.
 
-**Track B**:
-- Constant warmup steps per phase
-- Learning rate halved for refinement phases
-- **Why?**: Prevents later phases from destroying earlier learning
+2. **Explicit segment marking** (if not already supported):
+   - Surround anchor and candidate with special tokens, e.g. `[ANCHOR] ... [/ANCHOR] [CAND] ... [/CAND]` fed into the encoder.
+   - Helps the model disambiguate roles of anchor vs. candidate.
 
-### 4.3. Gradient Clipping
+3. **Longer context when needed:**
+   - If narratives often get truncated, consider increasing `max_length` (e.g. 768–1024) with a more memory-efficient model, or using a long-context encoder.
 
-- **Value**: 1.0 (L2 norm)
-- **Purpose**: Prevents exploding gradients in deep networks
-- **Applied**: Both tracks
+### 3.2. Loss, Calibration, and Regularization
 
-### 4.4. Weight Decay (AdamW)
+1. **Temperature-scaled pairwise loss:**
+   - Keep the current CrossEntropy over `[score_A, score_B]`, but introduce a learnable or fixed temperature `τ`:
+     
 
-- **Value**: 0.01
-- **Optimizer**: AdamW (decoupled weight decay)
-- **Purpose**: Regularization without interfering with Adam's adaptive learning rates
-- **Reference**: Loshchilov & Hutter (2019)
+     `scores' = scores / τ`, then apply `CrossEntropyLoss`.
 
----
+   - A smaller `τ` (e.g. 0.5) sharpens the distribution; tune on validation or via grid search.
 
-## 5. Data Preparation
+2. **Symmetric training with A/B swaps (systematic):**
+   - You already have position-swap augmentation in the conceptual approach; enforce it strictly in data prep: for each triple, include both `(anchor, A, B, label)` and `(anchor, B, A, 1-label)`.
+   - This removes position bias and doubles effective data.
 
-### 5.1. From Track A to Training Data
+3. **R-Drop style consistency regularization (if compute allows):**
+   - For each input pair, do two forward passes with dropout on, and add a KL-divergence loss between their logits.
+   - Encourages more stable predictions and improves generalization on small datasets.
 
-**Input**: Track A JSONL with fields:
-- `anchor_text`
-- `text_a`
-- `text_b`
-- `text_a_is_closer` (label)
+4. **Careful label smoothing:**
+   - If you reintroduce label smoothing, keep it **small** (e.g. 0.02–0.05). Too much smoothing harms a binary pairwise task.
 
-**Output Data Formats**:
+### 3.3. Data and Sampling Strategy
 
-1. **Cross-Encoder Data** (Track A):
-   ```python
-   {
-     "anchor": str,
-     "text_a": str,
-     "text_b": str,
-     "label": 1 if A closer, 0 if B closer
-   }
-   ```
-   - With A/B swap augmentation: 2x samples
+1. **Curriculum over difficulty:**
+   - Initially sample triples uniformly.
+   - After a warmup stage, compute model confidence; prioritize **borderline cases** where |score_A − score_B| is small for continued training (hard-example mining at Triple-level).
 
-2. **Triplets** (Track B - TripletLoss):
-   ```python
-   {
-     "anchor": str,
-     "positive": closer_text,
-     "negative": farther_text
-   }
-   ```
+2. **Text augmentations (light only):**
+   - Mild word-level synonym replacements or paraphrases for anchors and candidates, preserving narrative meaning.
+   - Small random deletion of unimportant adjectives/adverbs to encourage robustness.
 
-3. **Pairs** (Track B - MNR Loss):
-   ```python
-   {
-     "anchor": str,
-     "candidate": str,
-     "label": 1.0 if positive, 0.0 if negative
-   }
-   ```
+3. **Leverage Track B embeddings for hard negatives:**
+   - Use a **frozen Track B encoder** to find stories that are embedding-close but not the gold answer.
+   - Build additional triples where the negative is “semantically close but wrong”, improving discriminative power.
 
-### 5.2. K-Fold Splits
+### 3.4. K-Fold Training and Ensembling
 
-- **Method**: sklearn.KFold with shuffle
-- **Seed**: 42 (reproducibility)
-- **Storage**: `kfold_splits.json` with train/val indices
+**Current:** K-fold training implemented but likely used mainly for evaluation. fileciteturn0file1  
+
+**Improvement:** Use **fold models as an ensemble at inference**:
+
+- Train `K` models (one per fold).
+- At inference, for a given triple:
+  - Compute `(score_A_k, score_B_k)` for each model `k`.
+  - Aggregate (e.g., average logits or probabilities) across folds.
+  - Decide via aggregated scores.
+- Ensembling of 3–5 strong models often yields **1–3 points** of accuracy improvement with no change to the training script’s core logic.
+
+### 3.5. Evaluation & Error Analysis Loop
+
+- Maintain an **error log of dev triples** where the model consistently fails (across folds).
+- Analyze patterns:
+  - Temporal reasoning? Character identity confusion? Plot twist handling?
+- Use this to design **targeted synthetic data** (via LLMs) that mirror those failure modes and add them as additional training triples.
 
 ---
 
-## 6. Performance Expectations
+## 4. Track B – Embedding Model Improvements
 
-### Baseline
-- **Random**: 50% accuracy
-- **Off-the-shelf embeddings**: ~60-65%
+### 4.1. Base Encoder and Dimensionality
 
-### Implemented System
-- **Track B (BGE bi-encoder)**: 85-87% accuracy
-- **Track A (RoBERTa cross-encoder)**: 70-80% accuracy
-- **Track A with ensemble**: +1-3% over single model
+**Current:** `BAAI/bge-base-en-v1.5` (109M parameters, 768-dim embeddings). fileciteturn0file0turn0file2  
 
-### Training Time (Google Colab T4, 16GB)
-- **Track B**: ~36-45 minutes (15 epochs)
-- **Track A**: ~40-50 minutes per fold
-- **Track A (5 folds)**: ~3.5-4 hours total
+**Improvements:**
 
-### Memory Usage
-- **Track A**: ~5-6 GB VRAM (batch_size=6)
-- **Track B**: ~4-5 GB VRAM (batch_size=24)
-- Both fit comfortably on 6GB+ GPUs
+1. **Try a stronger encoder within the 8192-dim limit:**
+   - **BGE-large-en**, **GTE-large**, or a similar high-quality English embedding model (typically 1024-dim).
+   - The dimensionality constraint (10–8192) is generous, allowing more expressive representations.
+   - Verify that hardware constraints (VRAM) remain acceptable.
 
----
+2. **Explicit normalization and scaling:**
+   - Ensure embeddings are **L2-normalized** before cosine similarity (either via configuration or explicit normalization layer).
+   - Experiment with a **scaling factor / temperature** on cosine scores during training to sharpen gradients.
 
-## 7. Technology Stack
+### 4.2. Training Curriculum and Losses
 
-### Core Libraries
-- **PyTorch**: 2.0+ (deep learning framework)
-- **Transformers**: 4.30+ (Hugging Face)
-- **Sentence-Transformers**: 2.2+ (embedding models & losses)
-- **scikit-learn**: 1.3+ (k-fold splits)
+**Current:** Multi-phase training with:
+1. PairwiseSoftmaxLoss on triples.
+2. TripletLoss on triplets.
+3. Optional MultipleNegativesRankingLoss on positive pairs. fileciteturn0file0turn0file2  
 
-### Training Infrastructure
-- **Google Colab**: T4 GPU (16GB VRAM) - recommended for training
-- **Local GPU**: RTX 4050 (6GB VRAM) - suitable for inference, slower training
-- **CUDA**: 11.8 or 12.1
+**Refinements:**
 
-### Data Storage
-- **Google Drive**: Model checkpoints and prepared data
-- **Git**: Code version control
-- **Local**: Inference and evaluation
+1. **Re-balance phase lengths and monitor Track B-specific metrics:**
+   - Instead of fixed `epochs // 2` per phase, adapt based on validation performance.
+   - Introduce a small, **true Track B-dev set** (no overlap with Track A dev) to monitor embedding quality directly (via triple reconstruction or STS-style scoring).
 
----
+2. **Hard-negative mining loop:**
+   - After initial training, encode all stories.
+   - For each anchor, retrieve top-K nearest neighbors (excluding the gold positives).
+   - Build new triplets `(anchor, gold_positive, hard_negative)` where negatives are **embedding-near but label-far**.
+   - Run an additional fine-tuning stage **only** on these hard triplets with TripletLoss and/or PairwiseSoftmaxLoss.
 
-## 8. References
+3. **Order of losses:**
+   - Consider starting with **MultipleNegativesRankingLoss** on large positive-pair data to shape a global semantic space.
+   - Then apply **PairwiseSoftmaxLoss** focused specifically on competition triples, aligning final geometry to the evaluation metric.
 
-### Models
-- **RoBERTa**: Liu et al. (2019) - RoBERTa: A Robustly Optimized BERT Pretraining Approach
-- **BGE**: Xiao et al. (2023) - C-Pack: Packaged Resources To Advance General Chinese Embedding
-- **Sentence-BERT**: Reimers & Gurevych (2019) - Sentence-BERT: Sentence Embeddings using Siamese BERT-Networks
+4. **Mix-up between pairwise and triplet objectives:**
+   - In a final fine-tuning stage, alternate batches from PairwiseSoftmax and TripletLoss instead of full-phase separation, to avoid the later loss overwriting previous structure.
 
-### Training Techniques
-- **Mixed Precision**: Micikevicius et al. (2018) - Mixed Precision Training
-- **AdamW**: Loshchilov & Hutter (2019) - Decoupled Weight Decay Regularization
-- **Learning Rate Warmup**: Vaswani et al. (2017) - Attention Is All You Need
+### 4.3. External Data and Multi-Task Learning (if allowed)
 
-### Loss Functions
-- **TripletLoss**: Schroff et al. (2015) - FaceNet: A Unified Embedding for Face Recognition
-- **Multiple Negatives Ranking**: Henderson et al. (2017) - Efficient Natural Language Response Suggestion for Smart Reply
-- **Cross-Encoder Pairwise**: Nogueira & Cho (2020) - Passage Re-ranking with BERT
+If the competition rules permit additional data:
 
----
+1. **Pre-fine-tune on general STS / story similarity datasets:**
+   - Use generic sentence-embedding datasets (STS, NLI-based contrastive sets, etc.) to warm up the embedding model.
 
-## 9. File Structure
+2. **Narrative-specific auxiliary tasks:**
+   - Next-sentence prediction or ordering tasks on narrative corpora (story shuffling, story cloze-style datasets) to help the encoder internalize story flow and coherence.
 
-```
-project/
-├── config.yaml                    # All hyperparameters
-├── training/
-│   ├── prepare_data.py           # Convert Track A → training formats
-│   ├── train_track_a.py          # Cross-encoder training (Colab)
-│   ├── train_track_b.py          # Bi-encoder training (Colab)
-│   └── colab_utils.py            # Google Drive integration
-├── track_a.py                     # Cross-encoder inference (local)
-├── track_b.py                     # Bi-encoder inference (local)
-├── scripts/
-│   └── eval_local.py             # Local evaluation script
-└── models/                        # Trained checkpoints (Git-ignored)
-    ├── track_a_cross_encoder_fold0/
-    ├── track_a_cross_encoder_fold1/
-    └── track_b_embedder/
-```
+3. **Multi-task regime:**
+   - Alternate between generic STS batches and competition-specific triple/pair batches, so the model does not overfit the small competition dataset.
 
----
+### 4.4. Using Track A as a Teacher (Knowledge Distillation)
 
-## 10. Design Philosophy
+Without violating the Track B inference rule (embeddings must be story-wise):
 
-1. **Simplicity First**: Use proven architectures without unnecessary complexity
-2. **Metric Alignment**: Train directly on evaluation objective when possible
-3. **Careful Regularization**: Small dataset requires early stopping and cross-validation
-4. **Hybrid Approach**: Train on GPU (Colab), infer locally
-5. **Reproducibility**: Fixed seeds, version-controlled code, logged experiments
-6. **Practical Engineering**: Balance SOTA techniques with implementation feasibility
+1. **Teacher = Track A cross-encoder**, Student = Track B bi-encoder.
+2. For each triple `(anchor, A, B)`:
+   - Teacher produces logits `(s_A, s_B)`.
+   - Student embeddings produce similarities `(sim_A, sim_B)`.
+   - Minimize a **distillation loss**:
+     - KL-divergence between softmax(teacher_scores / τ) and softmax(student_scores / τ),
+       where `student_scores = [sim_A, sim_B]`.
+3. This aligns the embedding geometry with the **fine-grained judgments** of the cross-encoder while maintaining independent per-story embeddings at inference.
+
+This is especially powerful when the cross-encoder is stronger (e.g. DeBERTa-v3-large) than the bi-encoder.
+
+### 4.5. Ensembling Embeddings
+
+To ensemble for Track B:
+
+- Train **multiple bi-encoders** with different seeds / architectures (e.g., BGE-base, BGE-large, GTE-large).
+- At inference: compute embeddings from each model and **concatenate or average** them:
+  - Concatenation: increases dimensionality but stays under 8192 easily.
+  - Averaging: keeps dimension fixed but aggregates knowledge.
+- Normalize the final embeddings and use cosine similarity as usual.
+
+This can be especially robust when each model is trained with slightly different loss schedules or augmentations.
 
 ---
 
-**This approach achieves strong performance (+25-35% over baseline) using standard deep learning techniques applied carefully to the narrative similarity task.**
+## 5. Shared Improvements Across Tracks
+
+### 5.1. Reproducibility and Robust Validation
+
+- Keep strict seed control (already present) and consider enabling deterministic flags if training variance is too high.
+- Use **stratified splits** across narrative types (if metadata available) to avoid domain shift between train and dev folds.
+
+### 5.2. Self-Training / Pseudo-Labeling
+
+1. Use the best current models to annotate additional unlabeled story pairs/triples (if you have access to more raw stories).
+2. Filter pseudo-labels by high-confidence predictions.
+3. Re-train or fine-tune both Track A and Track B models on the union of gold + high-confidence pseudo-labeled examples.
+
+### 5.3. Model Selection and Checkpoint Averaging
+
+- For each model, instead of picking a single best epoch checkpoint, consider **weight averaging** across the top N checkpoints (e.g. last 3 epochs before overfitting) to reduce variance.
+- This is often a cheap gain in stability and generalization.
+
+---
+
+## 6. Concrete “Next Experiments” Roadmap
+
+Here is an ordered list of experiments that are likely to give the **best return on time**:
+
+1. **Track A – DeBERTa-v3-large + fold ensemble:**
+   - Swap base model to DeBERTa-v3-large.
+   - Train with existing k-fold setup.
+   - At inference, ensemble all folds by averaging logits.
+
+2. **Track B – Upgrade to BGE-large (or similar) + same curriculum:**
+   - Keep the same PairwiseSoftmax → Triplet → MNR pipeline.
+   - Carefully watch VRAM and slightly lower batch size if needed.
+
+3. **Track A & B – Systematic A/B swap augmentation and light text augmentation.**
+
+4. **Track B – Hard-negative mining and second TripletLoss stage:**
+   - Mine hard negatives using the current encoder.
+   - Fine-tune for a few epochs only on these hard triplets.
+
+5. **Cross-task Distillation (Track A → Track B):**
+   - Train Track B with an additional distillation loss that matches its pairwise cosine scores to Track A’s logits.
+
+6. **Error-driven synthetic data generation:**
+   - For recurrent failure patterns, generate synthetic triples via a large LLM (if allowed) and incorporate them into training.
+
+Executing these steps iteratively, monitoring dev accuracy after each change instead of stacking all changes at once, should give a clear view of which ideas are truly moving the needle.
+
+---
+
+## 7. Summary
+
+- The **current approach is already solid and aligned with modern IR and metric-learning best practices**. fileciteturn0file0turn0file1turn0file2  
+- Major remaining gains are likely to come from:
+  - Stronger backbones (DeBERTa-v3 / larger embedding models),
+  - Better ensembling and cross-validation usage,
+  - Hard-negative mining and distillation between Track A and Track B,
+  - Carefully designed curricula and augmentations rather than radically new architectures.
+
+This plan keeps your existing codebase and training scripts as the backbone, while layering on **SOTA-inspired enhancements** in a controlled, incremental way.
