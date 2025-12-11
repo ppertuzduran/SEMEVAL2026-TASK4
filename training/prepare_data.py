@@ -7,15 +7,34 @@ This script:
 - Creates pairwise datasets: (anchor, candidate, label)
 - Implements optional data augmentation
 - Saves prepared datasets for training
+
+Works in both local and Google Colab environments.
 """
 
 import json
 import random
+import sys
 from pathlib import Path
 from typing import List, Dict, Tuple
 import pandas as pd
 import yaml
 from sklearn.model_selection import KFold
+
+# Import Colab utilities
+try:
+    from colab_utils import is_colab, setup_colab_environment, update_config_for_colab, install_colab_dependencies, print_gpu_info
+except ImportError:
+    # If running locally without colab_utils in path
+    sys.path.insert(0, str(Path(__file__).parent))
+    try:
+        from colab_utils import is_colab, setup_colab_environment, update_config_for_colab, install_colab_dependencies, print_gpu_info
+    except ImportError:
+        # Fallback for local execution
+        def is_colab(): return False
+        def setup_colab_environment(x): return None
+        def update_config_for_colab(c, p): return c
+        def install_colab_dependencies(): pass
+        def print_gpu_info(): pass
 
 
 def load_config(config_path: str = "config.yaml") -> dict:
@@ -145,8 +164,25 @@ def save_dataset(data: List[Dict], path: str):
 
 def main():
     """Main data preparation pipeline."""
+    # Setup Colab environment if running in Colab
+    if is_colab():
+        print("="*60)
+        print("RUNNING IN GOOGLE COLAB")
+        print("="*60)
+        install_colab_dependencies()
+        colab_paths = setup_colab_environment()
+        print_gpu_info()
+    else:
+        print("Running locally")
+        colab_paths = None
+    
     # Load configuration
-    config = load_config()
+    if colab_paths:
+        config = load_config(colab_paths['config_path'])
+        config = update_config_for_colab(config, colab_paths)
+    else:
+        config = load_config()
+    
     seed = config['seed']
     random.seed(seed)
     
