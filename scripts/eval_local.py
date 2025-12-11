@@ -76,13 +76,14 @@ def evaluate_track_a(predictions_path: str, labels_path: str) -> Dict:
     return metrics
 
 
-def evaluate_track_b_with_track_a(embeddings_path: str, labels_path: str) -> Dict:
+def evaluate_track_b_with_track_a(embeddings_path: str, labels_path: str, track_b_path: str = None) -> Dict:
     """
     Evaluate Track B embeddings using Track A labels.
     
     Args:
         embeddings_path: Path to embeddings .npy file
         labels_path: Path to Track A ground truth JSONL
+        track_b_path: Path to Track B data JSONL (for text-to-embedding mapping)
         
     Returns:
         Dictionary of evaluation metrics
@@ -93,11 +94,12 @@ def evaluate_track_b_with_track_a(embeddings_path: str, labels_path: str) -> Dic
     embeddings = np.load(embeddings_path)
     
     # Load Track B data (to get text-to-embedding mapping)
-    config = load_config()
-    if config:
-        track_b_path = config['data']['dev_track_b']
-    else:
-        track_b_path = "data/dev_track_b.jsonl"
+    if track_b_path is None:
+        config = load_config()
+        if config:
+            track_b_path = config['data']['dev_track_b']
+        else:
+            track_b_path = "data/dev_track_b.jsonl"
     
     track_b_df = pd.read_json(track_b_path, lines=True)
     
@@ -213,6 +215,7 @@ def main():
     
     # Get paths from config
     labels_path = config['data']['dev_track_a']
+    track_b_path = config['data']['dev_track_b']
     predictions_path = Path(config['data']['output_dir']) / 'track_a.jsonl'
     embeddings_path = Path(config['data']['output_dir']) / 'track_b.npy'
     results_path = Path(config['data']['output_dir']) / 'evaluation_results.json'
@@ -237,8 +240,13 @@ def main():
         if embeddings_path.exists():
             print(f"\nEvaluating Track B embeddings...")
             print(f"  Embeddings: {embeddings_path}")
+            print(f"  Track B data: {track_b_path}")
             print(f"  Labels: {labels_path}")
-            track_b_metrics = evaluate_track_b_with_track_a(str(embeddings_path), labels_path)
+            track_b_metrics = evaluate_track_b_with_track_a(
+                str(embeddings_path), 
+                labels_path,
+                track_b_path
+            )
             print_metrics(track_b_metrics, "Track B: Bi-Encoder Results")
             results['track_b'] = track_b_metrics
         else:
