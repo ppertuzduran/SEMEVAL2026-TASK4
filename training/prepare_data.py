@@ -164,23 +164,32 @@ def save_dataset(data: List[Dict], path: str):
 
 def main():
     """Main data preparation pipeline."""
-    # Setup Colab environment if running in Colab
-    if is_colab():
+    # Check if we're using Drive-based setup or cloned repo
+    import os
+    using_drive_setup = os.path.exists('/content/drive/MyDrive/narrative_similarity/config.yaml')
+    
+    # Setup Colab environment if running in Drive-based mode
+    if is_colab() and using_drive_setup:
         print("="*60)
-        print("RUNNING IN GOOGLE COLAB")
+        print("RUNNING IN GOOGLE COLAB - DRIVE MODE")
         print("="*60)
         install_colab_dependencies()
         colab_paths = setup_colab_environment()
         print_gpu_info()
-    else:
-        print("Running locally")
-        colab_paths = None
-    
-    # Load configuration
-    if colab_paths:
+        
+        # Load and update config
         config = load_config(colab_paths['config_path'])
         config = update_config_for_colab(config, colab_paths)
     else:
+        # Standard mode (local or cloned repo in Colab)
+        if is_colab():
+            print("="*60)
+            print("RUNNING IN GOOGLE COLAB - REPO MODE")
+            print("="*60)
+        else:
+            print("Running locally")
+        
+        # Just load config normally
         config = load_config()
     
     seed = config['seed']

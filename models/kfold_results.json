@@ -1,27 +1,27 @@
 [
   {
     "fold": 0,
-    "val_accuracy": 0.825,
-    "model_path": "models/track_a_cross_encoder_fold0"
+    "val_accuracy": 0.85,
+    "model_path": "/content/drive/MyDrive/narrative_similarity/models/track_a_cross_encoder_fold0"
   },
   {
     "fold": 1,
-    "val_accuracy": 1.0,
-    "model_path": "models/track_a_cross_encoder_fold1"
+    "val_accuracy": 0.95,
+    "model_path": "/content/drive/MyDrive/narrative_similarity/models/track_a_cross_encoder_fold1"
   },
   {
     "fold": 2,
-    "val_accuracy": 0.825,
-    "model_path": "models/track_a_cross_encoder_fold2"
+    "val_accuracy": 0.875,
+    "model_path": "/content/drive/MyDrive/narrative_similarity/models/track_a_cross_encoder_fold2"
   },
   {
     "fold": 3,
-    "val_accuracy": 0.825,
-    "model_path": "models/track_a_cross_encoder_fold3"
+    "val_accuracy": 0.85,
+    "model_path": "/content/drive/MyDrive/narrative_similarity/models/track_a_cross_encoder_fold3"
   },
   {
     "fold": 4,
     "val_accuracy": 0.775,
-    "model_path": "models/track_a_cross_encoder_fold4"
+    "model_path": "/content/drive/MyDrive/narrative_similarity/models/track_a_cross_encoder_fold4"
   }
 ]
