@@ -13,6 +13,8 @@ import random
 from pathlib import Path
 import numpy as np
 import torch
+import torch.nn as nn
+import torch.nn.functional as F
 import yaml
 from torch.utils.data import DataLoader
 from sentence_transformers import SentenceTransformer, InputExample, losses
@@ -75,6 +77,64 @@ def create_pair_examples(pairs: list) -> list:
             examples.append(InputExample(
                 texts=[p['anchor'], p['candidate']]
             ))
+    return examples
+
+
+class PairwiseSoftmaxLoss(nn.Module):
+    """
+    NEW: Direct triple-wise pairwise softmax loss.
+    
+    Directly optimizes the evaluation metric by:
+    1. Encoding anchor, text_a, text_b independently
+    2. Computing cosine similarities
+    3. Applying softmax cross-entropy
+    
+    This aligns training with the triple-wise evaluation.
+    """
+    
+    def __init__(self, model: SentenceTransformer):
+        super(PairwiseSoftmaxLoss, self).__init__()
+        self.model = model
+        self.loss_fn = nn.CrossEntropyLoss()
+    
+    def forward(self, sentence_features, labels):
+        """
+        sentence_features: List of dicts with 'input_ids', 'attention_mask', etc.
+                          [anchor_features, text_a_features, text_b_features]
+        labels: Tensor of shape (batch_size,) with 1 if A is closer, 0 if B is closer
+        """
+        # Encode all three texts independently
+        embeddings = [self.model(sf)['sentence_embedding'] for sf in sentence_features]
+        anchor_emb = embeddings[0]  # (batch, embed_dim)
+        a_emb = embeddings[1]
+        b_emb = embeddings[2]
+        
+        # Compute cosine similarities
+        sim_a = F.cosine_similarity(anchor_emb, a_emb, dim=1)  # (batch,)
+        sim_b = F.cosine_similarity(anchor_emb, b_emb, dim=1)  # (batch,)
+        
+        # Stack similarities and apply softmax
+        scores = torch.stack([sim_a, sim_b], dim=1)  # (batch, 2)
+        
+        # Convert labels: 1 → index 0 (A closer), 0 → index 1 (B closer)
+        targets = (1 - labels).long()
+        
+        # Cross-entropy loss
+        loss = self.loss_fn(scores, targets)
+        return loss
+
+
+def create_triple_softmax_examples(data: list) -> list:
+    """
+    Create examples for PairwiseSoftmaxLoss.
+    Each example contains (anchor, text_a, text_b, label).
+    """
+    examples = []
+    for item in data:
+        examples.append(InputExample(
+            texts=[item['anchor'], item['text_a'], item['text_b']],
+            label=float(item['label'])
+        ))
     return examples
 
 
@@ -171,6 +231,14 @@ def main():
     pairs = load_pairs(prepared_dir / "pairs.jsonl")
     print(f"Loaded {len(pairs)} pairs")
     
+    # Load cross-encoder data for pairwise softmax loss
+    print("Loading cross-encoder data for pairwise softmax...")
+    cross_encoder_data = []
+    with open(prepared_dir / "cross_encoder_data.jsonl", 'r', encoding='utf-8') as f:
+        for line in f:
+            cross_encoder_data.append(json.loads(line))
+    print(f"Loaded {len(cross_encoder_data)} triple samples")
+    
     # Load train/val split
     with open(prepared_dir / "train_val_split.json", 'r') as f:
         split = json.load(f)
@@ -178,20 +246,21 @@ def main():
     train_indices = set(split['train'])
     val_indices = set(split['val'])
     
-    # Split triplets and pairs
+    # Split data
     train_triplets = [t for i, t in enumerate(triplets) if i in train_indices]
     val_triplets = [t for i, t in enumerate(triplets) if i in val_indices]
-    
-    # For pairs, we have 2 pairs per original sample
     train_pairs = [p for i, p in enumerate(pairs) if i // 2 in train_indices]
+    train_cross_encoder = [d for i, d in enumerate(cross_encoder_data) if i // 2 in train_indices]
     
     print(f"\nTrain triplets: {len(train_triplets)}")
     print(f"Val triplets: {len(val_triplets)}")
     print(f"Train pairs: {len(train_pairs)}")
+    print(f"Train cross-encoder (for pairwise softmax): {len(train_cross_encoder)}")
     
     # Create InputExamples
     triplet_examples = create_triplet_examples(train_triplets)
     pair_examples = create_pair_examples(train_pairs)
+    triple_softmax_examples = create_triple_softmax_examples(train_cross_encoder)
     
     # Create DataLoaders
     batch_size = config['track_b']['batch_size']
@@ -208,6 +277,12 @@ def main():
         shuffle=True
     )
     
+    triple_softmax_loader = DataLoader(
+        triple_softmax_examples,
+        batch_size=batch_size,
+        shuffle=True
+    )
+    
     # Setup losses
     triplet_loss = losses.TripletLoss(
         model=model,
@@ -216,6 +291,8 @@ def main():
     )
     
     mnr_loss = losses.MultipleNegativesRankingLoss(model=model)
+    
+    pairwise_softmax_loss = PairwiseSoftmaxLoss(model=model)
     
     # Training parameters
     num_epochs = config['track_b']['epochs']
@@ -228,22 +305,54 @@ def main():
         save_path=config['track_b']['model_save_path']
     )
     
-    # Training strategy: Alternate between triplet and MNR loss
-    # We'll train with triplet loss, then evaluate
+    # NEW TRAINING STRATEGY: Multi-loss combination
+    # 1. Start with pairwise softmax (directly optimizes evaluation metric)
+    # 2. Then fine-tune with TripletLoss + MNR for better embeddings
+    
+    use_pairwise = config['track_b'].get('use_pairwise_softmax', True)
+    
+    if use_pairwise and len(triple_softmax_examples) > 0:
+        print("\n" + "="*60)
+        print("Phase 1: Training with PairwiseSoftmaxLoss (direct metric optimization)...")
+        print("="*60)
+        
+        model.fit(
+            train_objectives=[(triple_softmax_loader, pairwise_softmax_loss)],
+            epochs=num_epochs // 2,  # Half epochs for pairwise
+            warmup_steps=warmup_steps,
+            optimizer_params={'lr': config['track_b']['learning_rate']},
+            weight_decay=config['track_b']['weight_decay'],
+            evaluation_steps=config['track_b']['eval_steps'],
+            evaluator=evaluator,
+            output_path=config['track_b']['model_save_path'] + "_temp",
+            save_best_model=False,
+            use_amp=config['track_b']['mixed_precision']
+        )
+        
+        # Load best from phase 1
+        model = SentenceTransformer(config['track_b']['model_save_path'], device=device)
+        evaluator = CustomEvaluator(
+            dev_path=config['data']['dev_track_a'],
+            device=device,
+            save_path=config['track_b']['model_save_path']
+        )
+        evaluator.best_accuracy = evaluator(model, "", 0, 0)
+    
+    # Phase 2: TripletLoss for better embedding quality
     print("\n" + "="*60)
-    print("Starting training with TripletLoss...")
+    print("Phase 2: Fine-tuning with TripletLoss...")
     print("="*60)
     
     model.fit(
         train_objectives=[(triplet_loader, triplet_loss)],
-        epochs=num_epochs,
-        warmup_steps=warmup_steps,
-        optimizer_params={'lr': config['track_b']['learning_rate']},
+        epochs=num_epochs // 2,
+        warmup_steps=warmup_steps // 2,
+        optimizer_params={'lr': config['track_b']['learning_rate'] / 2},
         weight_decay=config['track_b']['weight_decay'],
         evaluation_steps=config['track_b']['eval_steps'],
         evaluator=evaluator,
         output_path=config['track_b']['model_save_path'] + "_temp",
-        save_best_model=False,  # We handle this in the evaluator
+        save_best_model=False,
         use_amp=config['track_b']['mixed_precision']
     )
     

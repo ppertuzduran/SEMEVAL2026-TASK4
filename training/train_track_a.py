@@ -46,10 +46,12 @@ def load_config(config_path: str = "config.yaml") -> dict:
 
 class NarrativeSimilarityDataset(Dataset):
     """
-    Dataset for cross-encoder training.
+    Dataset for pairwise scoring cross-encoder training.
     
-    Input format: [CLS] anchor [SEP] text_a [SEP] text_b [SEP]
-    Label: 1 if text_a is closer, 0 if text_b is closer
+    NEW APPROACH: Score (anchor, A) and (anchor, B) separately, then apply softmax.
+    This is more stable and aligns with IR reranking best practices.
+    
+    Each sample returns both pairs for a triple.
     """
     
     def __init__(self, data: List[Dict], tokenizer, max_length: int = 512):
@@ -63,13 +65,21 @@ class NarrativeSimilarityDataset(Dataset):
     def __getitem__(self, idx):
         item = self.data[idx]
         
-        # Concatenate: anchor [SEP] text_a [SEP] text_b
-        # The tokenizer will add [CLS] at the beginning
-        text = f"{item['anchor']} {self.tokenizer.sep_token} {item['text_a']} {self.tokenizer.sep_token} {item['text_b']}"
+        # Pairwise scoring: encode (anchor, text_a) and (anchor, text_b) separately
+        # Pair A: anchor + text_a
+        text_a_pair = f"{item['anchor']} {self.tokenizer.sep_token} {item['text_a']}"
+        encoding_a = self.tokenizer(
+            text_a_pair,
+            max_length=self.max_length,
+            padding='max_length',
+            truncation=True,
+            return_tensors='pt'
+        )
         
-        # Tokenize
-        encoding = self.tokenizer(
-            text,
+        # Pair B: anchor + text_b
+        text_b_pair = f"{item['anchor']} {self.tokenizer.sep_token} {item['text_b']}"
+        encoding_b = self.tokenizer(
+            text_b_pair,
             max_length=self.max_length,
             padding='max_length',
             truncation=True,
@@ -77,8 +87,10 @@ class NarrativeSimilarityDataset(Dataset):
         )
         
         return {
-            'input_ids': encoding['input_ids'].squeeze(0),
-            'attention_mask': encoding['attention_mask'].squeeze(0),
+            'input_ids_a': encoding_a['input_ids'].squeeze(0),
+            'attention_mask_a': encoding_a['attention_mask'].squeeze(0),
+            'input_ids_b': encoding_b['input_ids'].squeeze(0),
+            'attention_mask_b': encoding_b['attention_mask'].squeeze(0),
             'labels': torch.tensor(item['label'], dtype=torch.long)
         }
 
@@ -92,31 +104,55 @@ def load_cross_encoder_data(path: str) -> List[Dict]:
     return data
 
 
-def train_epoch(model, dataloader, optimizer, scheduler, device, use_amp=True, clip_value=1.0):
-    """Train for one epoch."""
+def train_epoch(model, dataloader, optimizer, scheduler, device, use_amp=True, clip_value=1.0, label_smoothing=0.0):
+    """
+    Train for one epoch with pairwise scoring.
+    
+    NEW APPROACH: Score (anchor, A) and (anchor, B) separately,
+    then apply softmax cross-entropy loss.
+    """
     model.train()
     total_loss = 0
     correct = 0
     total = 0
     
     scaler = torch.cuda.amp.GradScaler() if use_amp else None
+    loss_fn = nn.CrossEntropyLoss(label_smoothing=label_smoothing)
     
     pbar = tqdm(dataloader, desc="Training")
     for batch in pbar:
-        input_ids = batch['input_ids'].to(device)
-        attention_mask = batch['attention_mask'].to(device)
+        # Get pairs
+        input_ids_a = batch['input_ids_a'].to(device)
+        attention_mask_a = batch['attention_mask_a'].to(device)
+        input_ids_b = batch['input_ids_b'].to(device)
+        attention_mask_b = batch['attention_mask_b'].to(device)
         labels = batch['labels'].to(device)
         
         optimizer.zero_grad()
         
         if use_amp and device == 'cuda':
             with torch.cuda.amp.autocast():
-                outputs = model(
-                    input_ids=input_ids,
-                    attention_mask=attention_mask,
-                    labels=labels
+                # Score pair A: (anchor, text_a)
+                outputs_a = model(
+                    input_ids=input_ids_a,
+                    attention_mask=attention_mask_a
                 )
-                loss = outputs.loss
+                score_a = outputs_a.logits[:, 1]  # Take positive class logit as score
+                
+                # Score pair B: (anchor, text_b)
+                outputs_b = model(
+                    input_ids=input_ids_b,
+                    attention_mask=attention_mask_b
+                )
+                score_b = outputs_b.logits[:, 1]  # Take positive class logit as score
+                
+                # Stack scores and apply softmax cross-entropy
+                scores = torch.stack([score_a, score_b], dim=1)  # Shape: (batch, 2)
+                # Label: 1 if A is closer (index 0), 0 if B is closer (index 1)
+                # Need to invert: if label=1, target should be index 0 (score_a)
+                targets = (1 - labels).long()  # Invert: 1→0, 0→1
+                
+                loss = loss_fn(scores, targets)
             
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
@@ -124,22 +160,34 @@ def train_epoch(model, dataloader, optimizer, scheduler, device, use_amp=True, c
             scaler.step(optimizer)
             scaler.update()
         else:
-            outputs = model(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                labels=labels
+            # Score pair A
+            outputs_a = model(
+                input_ids=input_ids_a,
+                attention_mask=attention_mask_a
             )
-            loss = outputs.loss
+            score_a = outputs_a.logits[:, 1]
+            
+            # Score pair B
+            outputs_b = model(
+                input_ids=input_ids_b,
+                attention_mask=attention_mask_b
+            )
+            score_b = outputs_b.logits[:, 1]
+            
+            # Compute loss
+            scores = torch.stack([score_a, score_b], dim=1)
+            targets = (1 - labels).long()
+            loss = loss_fn(scores, targets)
+            
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), clip_value)
             optimizer.step()
         
         scheduler.step()
         
-        # Calculate accuracy
-        logits = outputs.logits
-        predictions = torch.argmax(logits, dim=-1)
-        correct += (predictions == labels).sum().item()
+        # Calculate accuracy: argmax over [score_a, score_b]
+        predictions = torch.argmax(scores, dim=-1)
+        correct += (predictions == targets).sum().item()
         total += labels.size(0)
         
         total_loss += loss.item()
@@ -151,29 +199,44 @@ def train_epoch(model, dataloader, optimizer, scheduler, device, use_amp=True, c
 
 
 @torch.no_grad()
-def evaluate(model, dataloader, device):
-    """Evaluate the model."""
+def evaluate(model, dataloader, device, label_smoothing=0.0):
+    """Evaluate the model with pairwise scoring."""
     model.eval()
     total_loss = 0
     correct = 0
     total = 0
     
+    loss_fn = nn.CrossEntropyLoss(label_smoothing=label_smoothing)
+    
     for batch in tqdm(dataloader, desc="Evaluating"):
-        input_ids = batch['input_ids'].to(device)
-        attention_mask = batch['attention_mask'].to(device)
+        # Get pairs
+        input_ids_a = batch['input_ids_a'].to(device)
+        attention_mask_a = batch['attention_mask_a'].to(device)
+        input_ids_b = batch['input_ids_b'].to(device)
+        attention_mask_b = batch['attention_mask_b'].to(device)
         labels = batch['labels'].to(device)
         
-        outputs = model(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            labels=labels
+        # Score pair A
+        outputs_a = model(
+            input_ids=input_ids_a,
+            attention_mask=attention_mask_a
         )
+        score_a = outputs_a.logits[:, 1]
         
-        loss = outputs.loss
-        logits = outputs.logits
-        predictions = torch.argmax(logits, dim=-1)
+        # Score pair B
+        outputs_b = model(
+            input_ids=input_ids_b,
+            attention_mask=attention_mask_b
+        )
+        score_b = outputs_b.logits[:, 1]
         
-        correct += (predictions == labels).sum().item()
+        # Compute loss and predictions
+        scores = torch.stack([score_a, score_b], dim=1)
+        targets = (1 - labels).long()
+        loss = loss_fn(scores, targets)
+        
+        predictions = torch.argmax(scores, dim=-1)
+        correct += (predictions == targets).sum().item()
         total += labels.size(0)
         total_loss += loss.item()
     
@@ -284,11 +347,17 @@ def train_single_model(
             scheduler,
             device,
             use_amp=config['track_a']['mixed_precision'],
-            clip_value=config['track_a']['gradient_clip']
+            clip_value=config['track_a']['gradient_clip'],
+            label_smoothing=config['track_a'].get('label_smoothing', 0.0)
         )
         
         # Evaluate
-        val_loss, val_acc = evaluate(model, val_loader, device)
+        val_loss, val_acc = evaluate(
+            model, 
+            val_loader, 
+            device,
+            label_smoothing=config['track_a'].get('label_smoothing', 0.0)
+        )
         
         print(f"Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f}")
         print(f"Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f}")

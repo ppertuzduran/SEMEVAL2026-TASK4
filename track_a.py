@@ -46,7 +46,9 @@ class CrossEncoderPredictor:
     @torch.no_grad()
     def predict(self, anchor: str, text_a: str, text_b: str) -> bool:
         """
-        Predict which text is closer to the anchor.
+        Predict which text is closer to the anchor using pairwise scoring.
+        
+        NEW APPROACH: Score (anchor, A) and (anchor, B) separately, compare scores.
         
         Args:
             anchor: The anchor story
@@ -56,35 +58,48 @@ class CrossEncoderPredictor:
         Returns:
             True if text_a is predicted to be closer, False otherwise
         """
-        # Format: [CLS] anchor [SEP] text_a [SEP] text_b [SEP]
-        text = f"{anchor} {self.tokenizer.sep_token} {text_a} {self.tokenizer.sep_token} {text_b}"
-        
-        # Tokenize
-        inputs = self.tokenizer(
-            text,
+        # Pairwise scoring: encode pairs separately
+        # Pair A: [CLS] anchor [SEP] text_a [SEP]
+        text_a_pair = f"{anchor} {self.tokenizer.sep_token} {text_a}"
+        inputs_a = self.tokenizer(
+            text_a_pair,
             max_length=512,
             padding='max_length',
             truncation=True,
             return_tensors='pt'
         )
+        inputs_a = {k: v.to(self.device) for k, v in inputs_a.items()}
         
-        # Move to device
-        inputs = {k: v.to(self.device) for k, v in inputs.items()}
+        # Pair B: [CLS] anchor [SEP] text_b [SEP]
+        text_b_pair = f"{anchor} {self.tokenizer.sep_token} {text_b}"
+        inputs_b = self.tokenizer(
+            text_b_pair,
+            max_length=512,
+            padding='max_length',
+            truncation=True,
+            return_tensors='pt'
+        )
+        inputs_b = {k: v.to(self.device) for k, v in inputs_b.items()}
         
-        # Get prediction
-        outputs = self.model(**inputs)
-        logits = outputs.logits
-        prediction = torch.argmax(logits, dim=-1).item()
+        # Get scores (use positive class logit as score)
+        outputs_a = self.model(**inputs_a)
+        score_a = outputs_a.logits[0, 1].item()
         
-        return bool(prediction)
+        outputs_b = self.model(**inputs_b)
+        score_b = outputs_b.logits[0, 1].item()
+        
+        # Predict: A is closer if score_a > score_b
+        return score_a > score_b
     
-    def predict_batch(self, df: pd.DataFrame, batch_size: int = 8) -> List[bool]:
+    def predict_batch(self, df: pd.DataFrame, batch_size: int = 4) -> List[bool]:
         """
-        Predict for a batch of samples.
+        Predict for a batch of samples using pairwise scoring.
+        
+        NEW APPROACH: Process (anchor, A) and (anchor, B) pairs separately.
         
         Args:
             df: DataFrame with columns 'anchor_text', 'text_a', 'text_b'
-            batch_size: Batch size for inference
+            batch_size: Batch size for inference (note: processes 2x pairs internally)
             
         Returns:
             List of predictions
@@ -94,34 +109,55 @@ class CrossEncoderPredictor:
         for i in tqdm(range(0, len(df), batch_size), desc="Predicting"):
             batch = df.iloc[i:i+batch_size]
             
-            # Prepare texts
-            texts = []
+            # Prepare pair A texts: (anchor, text_a)
+            texts_a = []
+            texts_b = []
             for _, row in batch.iterrows():
-                text = f"{row['anchor_text']} {self.tokenizer.sep_token} {row['text_a']} {self.tokenizer.sep_token} {row['text_b']}"
-                texts.append(text)
+                text_a = f"{row['anchor_text']} {self.tokenizer.sep_token} {row['text_a']}"
+                text_b = f"{row['anchor_text']} {self.tokenizer.sep_token} {row['text_b']}"
+                texts_a.append(text_a)
+                texts_b.append(text_b)
             
-            # Tokenize batch
-            inputs = self.tokenizer(
-                texts,
+            # Tokenize batch A
+            inputs_a = self.tokenizer(
+                texts_a,
                 max_length=512,
                 padding='max_length',
                 truncation=True,
                 return_tensors='pt'
             )
+            inputs_a = {k: v.to(self.device) for k, v in inputs_a.items()}
             
-            # Move to device
-            inputs = {k: v.to(self.device) for k, v in inputs.items()}
+            # Get scores for pair A
+            outputs_a = self.model(**inputs_a)
+            scores_a = outputs_a.logits[:, 1].detach().cpu().numpy()  # Positive class logit
             
-            # Get predictions
-            outputs = self.model(**inputs)
-            logits = outputs.logits
-            batch_predictions = torch.argmax(logits, dim=-1).cpu().numpy()
+            # Clear memory
+            if self.device == 'cuda':
+                del inputs_a, outputs_a
+                torch.cuda.empty_cache()
             
+            # Tokenize batch B
+            inputs_b = self.tokenizer(
+                texts_b,
+                max_length=512,
+                padding='max_length',
+                truncation=True,
+                return_tensors='pt'
+            )
+            inputs_b = {k: v.to(self.device) for k, v in inputs_b.items()}
+            
+            # Get scores for pair B
+            outputs_b = self.model(**inputs_b)
+            scores_b = outputs_b.logits[:, 1].detach().cpu().numpy()  # Positive class logit
+            
+            # Predict: A is closer if score_a > score_b
+            batch_predictions = scores_a > scores_b
             predictions.extend([bool(p) for p in batch_predictions])
             
             # Clear CUDA cache to free memory
             if self.device == 'cuda':
-                del inputs, outputs, logits, batch_predictions
+                del inputs_b, outputs_b, scores_a, scores_b
                 torch.cuda.empty_cache()
         
         return predictions
@@ -251,11 +287,11 @@ def main():
     # Calculate accuracy
     accuracy = (df["predicted_text_a_is_closer"] == df["text_a_is_closer"]).mean()
     print(f"\nAccuracy: {accuracy:.4f}")
-
+    
     # Prepare output
-df["text_a_is_closer"] = df["predicted_text_a_is_closer"]
-del df["predicted_text_a_is_closer"]
-
+    df["text_a_is_closer"] = df["predicted_text_a_is_closer"]
+    del df["predicted_text_a_is_closer"]
+    
     # Save results
     output_dir = Path("output")
     output_dir.mkdir(exist_ok=True)

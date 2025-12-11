@@ -13,22 +13,24 @@ data:
 
 # Track B - Bi-encoder settings
 track_b:
-  base_model: "all-MiniLM-L6-v2"  # Options: all-MiniLM-L6-v2, all-mpnet-base-v2, BAAI/bge-small-en-v1.5
+  base_model: "BAAI/bge-base-en-v1.5"  # UPGRADED: BGE outperforms MiniLM. Options: BAAI/bge-base-en-v1.5, intfloat/e5-base-v2, BAAI/bge-large-en-v1.5
   model_save_path: "models/track_b_embedder"
   
   # Training hyperparameters
-  batch_size: 32
+  batch_size: 24  # Reduced for larger model
   epochs: 10
-  learning_rate: 2.0e-5
+  learning_rate: 1.0e-5  # Lower LR for fine-tuning BGE
   warmup_steps: 100
   weight_decay: 0.01
   
   # Loss configuration
   triplet_margin: 0.5
   use_multiple_negatives_ranking: true
+  use_pairwise_softmax: true  # NEW: Direct triple-wise optimization
   loss_weights:
-    triplet: 0.5
-    cosine: 0.5
+    triplet: 0.3
+    mnr: 0.3
+    pairwise: 0.4  # Prioritize pairwise softmax
   
   # Training options
   mixed_precision: true
@@ -38,20 +40,20 @@ track_b:
 
 # Track A - Cross-encoder settings
 track_a:
-  base_model: "roberta-base"  # Options: roberta-base, distilroberta-base, microsoft/deberta-v3-base
+  base_model: "roberta-large"  # UPGRADED: RoBERTa-large (355M params, better than base). DeBERTa-v3 has tokenizer issues. Options: roberta-large, roberta-base
   model_save_path: "models/track_a_cross_encoder"
   
   # Training hyperparameters
-  batch_size: 16
+  batch_size: 6  # Reduced for RoBERTa-large and pairwise scoring (processes 2x inputs)
   epochs: 5
-  learning_rate: 2.0e-5
+  learning_rate: 1.0e-5  # Lower LR for large model fine-tuning
   warmup_ratio: 0.1
   weight_decay: 0.01
   
   # Model configuration
-  max_length: 512
+  max_length: 512  # RoBERTa max length (per pair)
   num_labels: 2
-  label_smoothing: 0.1
+  label_smoothing: 0.0  # REDUCED: From 0.1 to 0.0 per new approach (clearer signal)
   
   # Training options
   mixed_precision: true
@@ -63,6 +65,9 @@ track_a:
   # Ensemble settings (optional)
   use_ensemble: false
   ensemble_strategy: "average"  # average or vote
+  
+  # NEW: Pairwise scoring architecture
+  pairwise_scoring: true  # Score (anchor, A) and (anchor, B) separately
 
 # Data augmentation
 augmentation:
