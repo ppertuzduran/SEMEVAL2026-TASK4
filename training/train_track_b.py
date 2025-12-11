@@ -1,13 +1,14 @@
 """
 Training script for Track B: Bi-encoder (embedding model).
 
-Uses sentence-transformers with:
-- TripletLoss (margin-based)
-- MultipleNegativesRankingLoss
-- Mixed precision training
-- Evaluation on Track A dev set
+Google Colab training script.
 
-Works in both local and Google Colab environments.
+Uses sentence-transformers with:
+- Pairwise Softmax Loss (direct metric optimization)
+- TripletLoss (margin-based metric learning)
+- MultipleNegativesRankingLoss (contrastive learning)
+- Mixed precision training (FP16)
+- Saves models to Google Drive
 """
 
 import json
@@ -25,20 +26,7 @@ from sentence_transformers.evaluation import TripletEvaluator
 from tqdm import tqdm
 import pandas as pd
 from sentence_transformers.util import cos_sim
-
-# Import Colab utilities
-try:
-    from colab_utils import is_colab, setup_colab_environment, update_config_for_colab, install_colab_dependencies, print_gpu_info
-except ImportError:
-    sys.path.insert(0, str(Path(__file__).parent))
-    try:
-        from colab_utils import is_colab, setup_colab_environment, update_config_for_colab, install_colab_dependencies, print_gpu_info
-    except ImportError:
-        def is_colab(): return False
-        def setup_colab_environment(x): return None
-        def update_config_for_colab(c, p): return c
-        def install_colab_dependencies(): pass
-        def print_gpu_info(): pass
+from colab_utils import is_colab, setup_colab_environment, update_config_for_colab, install_colab_dependencies, print_gpu_info
 
 
 def set_seed(seed: int):
@@ -223,22 +211,23 @@ class CustomEvaluator:
 
 
 def main():
-    """Main training pipeline."""
-    # Setup Colab environment if running in Colab
-    if is_colab():
-        print("="*60)
-        print("RUNNING IN GOOGLE COLAB - TRACK B TRAINING")
-        print("="*60)
-        install_colab_dependencies()
-        colab_paths = setup_colab_environment()
-        print_gpu_info()
-        
-        # Load and update config
-        config = load_config(colab_paths['config_path'])
-        config = update_config_for_colab(config, colab_paths)
-    else:
-        print("Running locally")
-        config = load_config()
+    """Main training pipeline - Google Colab only."""
+    if not is_colab():
+        print("⚠️  This script is designed for Google Colab only!")
+        print("Please run in Google Colab with GPU enabled.")
+        sys.exit(1)
+    
+    print("="*60)
+    print("TRACK B TRAINING - GOOGLE COLAB")
+    print("="*60)
+    
+    # Setup Colab environment
+    colab_paths = setup_colab_environment()
+    print_gpu_info()
+    
+    # Load and update config
+    config = load_config(colab_paths['config_path'])
+    config = update_config_for_colab(config, colab_paths)
     
     set_seed(config['seed'])
     

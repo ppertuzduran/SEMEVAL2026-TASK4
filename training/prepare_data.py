@@ -1,14 +1,14 @@
 """
 Data preparation for Track A and Track B training.
 
+Google Colab training script.
+
 This script:
-- Loads Track A JSONL data
+- Loads Track A JSONL data from Google Drive
 - Creates triplet datasets: (anchor, positive, negative)
 - Creates pairwise datasets: (anchor, candidate, label)
 - Implements optional data augmentation
-- Saves prepared datasets for training
-
-Works in both local and Google Colab environments.
+- Saves prepared datasets to Google Drive
 """
 
 import json
@@ -19,22 +19,7 @@ from typing import List, Dict, Tuple
 import pandas as pd
 import yaml
 from sklearn.model_selection import KFold
-
-# Import Colab utilities
-try:
-    from colab_utils import is_colab, setup_colab_environment, update_config_for_colab, install_colab_dependencies, print_gpu_info
-except ImportError:
-    # If running locally without colab_utils in path
-    sys.path.insert(0, str(Path(__file__).parent))
-    try:
-        from colab_utils import is_colab, setup_colab_environment, update_config_for_colab, install_colab_dependencies, print_gpu_info
-    except ImportError:
-        # Fallback for local execution
-        def is_colab(): return False
-        def setup_colab_environment(x): return None
-        def update_config_for_colab(c, p): return c
-        def install_colab_dependencies(): pass
-        def print_gpu_info(): pass
+from colab_utils import is_colab, setup_colab_environment, update_config_for_colab, install_colab_dependencies, print_gpu_info
 
 
 def load_config(config_path: str = "config.yaml") -> dict:
@@ -163,25 +148,23 @@ def save_dataset(data: List[Dict], path: str):
 
 
 def main():
-    """Main data preparation pipeline."""
-    # Setup Colab environment if running in Colab
-    if is_colab():
-        print("="*60)
-        print("RUNNING IN GOOGLE COLAB")
-        print("="*60)
-        install_colab_dependencies()
-        colab_paths = setup_colab_environment()
-        print_gpu_info()
-    else:
-        print("Running locally")
-        colab_paths = None
+    """Main data preparation pipeline - Google Colab only."""
+    if not is_colab():
+        print("⚠️  This script is designed for Google Colab only!")
+        print("Please run in Colab or adapt paths for local use.")
+        sys.exit(1)
+    
+    print("="*60)
+    print("DATA PREPARATION - GOOGLE COLAB")
+    print("="*60)
+    
+    # Setup Colab environment
+    colab_paths = setup_colab_environment()
+    print_gpu_info()
     
     # Load configuration
-    if colab_paths:
-        config = load_config(colab_paths['config_path'])
-        config = update_config_for_colab(config, colab_paths)
-    else:
-        config = load_config()
+    config = load_config(colab_paths['config_path'])
+    config = update_config_for_colab(config, colab_paths)
     
     seed = config['seed']
     random.seed(seed)

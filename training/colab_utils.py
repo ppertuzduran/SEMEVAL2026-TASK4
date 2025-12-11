@@ -16,22 +16,25 @@ def is_colab():
         return False
 
 
-def setup_colab_environment(project_name="narrative_similarity", use_repo=True, repo_url=None):
+def setup_colab_environment(project_name="narrative_similarity"):
     """
     Setup Google Colab environment with Drive mounting.
     
-    NEW: Clone from repo (scripts) + Drive (data + models)
+    Assumes:
+    - Scripts cloned from GitHub (already in /content/project)
+    - Data uploaded to Drive
+    - Models will be saved to Drive
     
     Args:
         project_name: Name of project folder in Google Drive (for data/models)
-        use_repo: If True, clone scripts from GitHub repo
-        repo_url: GitHub repo URL (if None, will ask user to provide)
         
     Returns:
         dict: Paths configuration for Colab
     """
     if not is_colab():
-        return None
+        print("⚠️  This script is designed for Google Colab only!")
+        print("For local training, use the local workflow.")
+        sys.exit(1)
     
     print("🔧 Setting up Google Colab environment...")
     
@@ -87,41 +90,24 @@ def setup_colab_environment(project_name="narrative_similarity", use_repo=True, 
     
     print("✓ Data files found in Drive")
     
-    # Clone repository if requested
-    if use_repo:
-        if repo_url is None:
-            print("\n⚠️  No repo URL provided!")
-            print("Please provide repo URL in setup_colab_environment(repo_url='...')")
-            print("Or set use_repo=False to use files from Drive")
-            sys.exit(1)
-        
-        # Clone to /content/project
-        project_dir = Path("/content/project")
-        if project_dir.exists():
-            print("✓ Repository already cloned")
-        else:
-            print(f"📥 Cloning repository from: {repo_url}")
-            os.system(f"git clone {repo_url} /content/project")
-            print("✓ Repository cloned successfully!")
-        
-        # Change to cloned repo directory
-        os.chdir(project_dir)
-        config_path = project_dir / "config.yaml"
-        
-        if not config_path.exists():
-            print(f"\n⚠️  config.yaml not found in repository!")
-            sys.exit(1)
-        
-        print(f"✓ Working directory: {os.getcwd()}")
-        print(f"✓ Config loaded from: {config_path}")
-    else:
-        # Old behavior: use everything from Drive
-        config_path = drive_project / "config.yaml"
-        if not config_path.exists():
-            print(f"\n⚠️  config.yaml not found in Drive!")
-            sys.exit(1)
-        os.chdir(drive_project)
-        project_dir = drive_project
+    # Assume repository already cloned to /content/project
+    project_dir = Path("/content/project")
+    if not project_dir.exists():
+        print("\n⚠️  Repository not found at /content/project!")
+        print("Please run: !git clone YOUR_REPO_URL /content/project")
+        print("Before running this script.")
+        sys.exit(1)
+    
+    # Change to cloned repo directory
+    os.chdir(project_dir)
+    config_path = project_dir / "config.yaml"
+    
+    if not config_path.exists():
+        print(f"\n⚠️  config.yaml not found in repository!")
+        sys.exit(1)
+    
+    print(f"✓ Working directory: {os.getcwd()}")
+    print(f"✓ Scripts from repository: /content/project")
     
     # Return paths configuration
     paths = {
