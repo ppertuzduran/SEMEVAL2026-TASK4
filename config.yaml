@@ -13,11 +13,11 @@ data:
 
 # Track B - Bi-encoder settings
 track_b:
-  base_model: "BAAI/bge-base-en-v1.5"  # UPGRADED: BGE outperforms MiniLM. Options: BAAI/bge-base-en-v1.5, intfloat/e5-base-v2, BAAI/bge-large-en-v1.5
+  base_model: "BAAI/bge-base-en-v1.5"  # 109M params, 768-dim embeddings. BGE outperforms MiniLM and base sentence-transformers
   model_save_path: "models/track_b_embedder"
   
   # Training hyperparameters
-  batch_size: 24  # Reduced for larger model
+  batch_size: 24  # Optimal for 6GB GPU, increase to 32 on Colab T4 (16GB)
   epochs: 10
   learning_rate: 1.0e-5  # Lower LR for fine-tuning BGE
   warmup_steps: 100
@@ -26,7 +26,7 @@ track_b:
   # Loss configuration
   triplet_margin: 0.5
   use_multiple_negatives_ranking: true
-  use_pairwise_softmax: true  # NEW: Direct triple-wise optimization
+  use_pairwise_softmax: true  # Direct metric optimization (Phase 1)
   
   # Training options
   mixed_precision: true
@@ -35,7 +35,7 @@ track_b:
 
 # Track A - Cross-encoder settings
 track_a:
-  base_model: "roberta-large"  # UPGRADED: RoBERTa-large (355M params, better than base). DeBERTa-v3 has tokenizer issues. Options: roberta-large, roberta-base
+  base_model: "roberta-large"  # 355M params, proven performance on narrative similarity
   model_save_path: "models/track_a_cross_encoder"
   
   # Training hyperparameters
@@ -48,7 +48,7 @@ track_a:
   # Model configuration
   max_length: 512  # RoBERTa max length (per pair)
   num_labels: 2
-  label_smoothing: 0.0  # REDUCED: From 0.1 to 0.0 per new approach (clearer signal)
+  label_smoothing: 0.0  # No smoothing for better signal in pairwise task
   
   # Training options
   mixed_precision: true
@@ -62,6 +62,5 @@ track_a:
 
 # Data augmentation
 augmentation:
-  enable: true
-  swap_ab: true
+  swap_ab: true  # Systematic A/B position swap (doubles training data, removes position bias)
 
