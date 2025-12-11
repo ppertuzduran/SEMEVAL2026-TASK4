@@ -1,10 +1,13 @@
 """
-Local evaluation script for Track A and Track B.
+Evaluation script for Track A and Track B.
 
-This script evaluates model predictions against ground truth labels
+Google Colab script.
+
+Evaluates model predictions from Google Drive against ground truth labels
 and computes various metrics.
 """
 
+import sys
 import json
 from pathlib import Path
 from typing import Dict, Tuple
@@ -12,6 +15,10 @@ import pandas as pd
 import numpy as np
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, confusion_matrix
 import yaml
+
+# Add training directory to path for colab_utils
+sys.path.insert(0, '/content/project/training')
+from colab_utils import is_colab, setup_colab_environment, update_config_for_colab
 
 
 def load_config(config_path: str = "config.yaml") -> dict:
@@ -173,8 +180,14 @@ def compare_models(metrics_list: list, names: list):
 
 
 def main():
-    """Main evaluation pipeline."""
+    """Main evaluation pipeline - Google Colab only."""
     import argparse
+    
+    # Check if running in Colab
+    if not is_colab():
+        print("⚠️  This script is designed for Google Colab only!")
+        print("Evaluation must be run in Colab where models and data are stored.")
+        sys.exit(1)
     
     parser = argparse.ArgumentParser(description="Evaluate Track A and Track B models")
     parser.add_argument(
@@ -184,64 +197,64 @@ def main():
         default='both',
         help='Which track to evaluate'
     )
-    parser.add_argument(
-        '--predictions',
-        type=str,
-        default='output/track_a.jsonl',
-        help='Path to Track A predictions (JSONL)'
-    )
-    parser.add_argument(
-        '--embeddings',
-        type=str,
-        default='output/track_b.npy',
-        help='Path to Track B embeddings (.npy)'
-    )
-    parser.add_argument(
-        '--labels',
-        type=str,
-        default='data/dev_track_a.jsonl',
-        help='Path to ground truth labels'
-    )
-    parser.add_argument(
-        '--save',
-        type=str,
-        default='output/evaluation_results.json',
-        help='Path to save evaluation results'
-    )
     
     args = parser.parse_args()
+    
+    print("="*60)
+    print("EVALUATION - GOOGLE COLAB")
+    print("="*60)
+    
+    # Setup Colab environment
+    colab_paths = setup_colab_environment()
+    
+    # Load config with Drive paths
+    config = load_config(colab_paths['config_path'])
+    config = update_config_for_colab(config, colab_paths)
+    
+    # Get paths from config
+    labels_path = config['data']['dev_track_a']
+    predictions_path = Path(config['data']['output_dir']) / 'track_a.jsonl'
+    embeddings_path = Path(config['data']['output_dir']) / 'track_b.npy'
+    results_path = Path(config['data']['output_dir']) / 'evaluation_results.json'
     
     results = {}
     
     # Evaluate Track A
     if args.track in ['a', 'both']:
-        if Path(args.predictions).exists():
-            print(f"Evaluating Track A predictions from: {args.predictions}")
-            track_a_metrics = evaluate_track_a(args.predictions, args.labels)
+        if predictions_path.exists():
+            print(f"\nEvaluating Track A predictions...")
+            print(f"  Predictions: {predictions_path}")
+            print(f"  Labels: {labels_path}")
+            track_a_metrics = evaluate_track_a(str(predictions_path), labels_path)
             print_metrics(track_a_metrics, "Track A: Cross-Encoder Results")
             results['track_a'] = track_a_metrics
         else:
-            print(f"Track A predictions not found at: {args.predictions}")
+            print(f"\n⚠ Track A predictions not found at: {predictions_path}")
+            print("  Run: !python track_a.py first")
     
     # Evaluate Track B
     if args.track in ['b', 'both']:
-        if Path(args.embeddings).exists():
-            print(f"\nEvaluating Track B embeddings from: {args.embeddings}")
-            track_b_metrics = evaluate_track_b_with_track_a(args.embeddings, args.labels)
+        if embeddings_path.exists():
+            print(f"\nEvaluating Track B embeddings...")
+            print(f"  Embeddings: {embeddings_path}")
+            print(f"  Labels: {labels_path}")
+            track_b_metrics = evaluate_track_b_with_track_a(str(embeddings_path), labels_path)
             print_metrics(track_b_metrics, "Track B: Bi-Encoder Results")
             results['track_b'] = track_b_metrics
         else:
-            print(f"Track B embeddings not found at: {args.embeddings}")
+            print(f"\n⚠ Track B embeddings not found at: {embeddings_path}")
+            print("  Run: !python track_b.py first")
     
-    # Save results
+    # Save results to Drive
     if results:
-        output_path = Path(args.save)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
+        results_path.parent.mkdir(parents=True, exist_ok=True)
         
-        with open(output_path, 'w') as f:
+        with open(results_path, 'w') as f:
             json.dump(results, f, indent=2)
         
-        print(f"\nResults saved to: {output_path}")
+        print(f"\n{'='*60}")
+        print(f"✓ Results saved to: {results_path}")
+        print(f"{'='*60}")
     
     print(f"\n{'='*60}")
 

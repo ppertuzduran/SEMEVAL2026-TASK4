@@ -37,21 +37,24 @@ def load_config(config_path: str = "config.yaml") -> dict:
 class CrossEncoderPredictor:
     """Cross-encoder model for narrative similarity prediction."""
     
-    def __init__(self, model_path: str, device: str = None):
+    def __init__(self, model_path: str, device: str = None, verbose: bool = True):
         """
         Initialize the predictor.
         
         Args:
             model_path: Path to the fine-tuned model
             device: Device to use (cuda/cpu). Auto-detected if None.
+            verbose: Print loading messages
         """
         self.device = device if device else ('cuda' if torch.cuda.is_available() else 'cpu')
-        print(f"Loading model from: {model_path}")
+        if verbose:
+            print(f"Loading model from: {model_path}")
         self.tokenizer = AutoTokenizer.from_pretrained(model_path)
         self.model = AutoModelForSequenceClassification.from_pretrained(model_path)
         self.model.to(self.device)
         self.model.eval()
-        print(f"Model loaded on device: {self.device}")
+        if verbose:
+            print(f"Model loaded on device: {self.device}")
     
     @torch.no_grad()
     def predict(self, anchor: str, text_a: str, text_b: str) -> bool:
@@ -116,7 +119,12 @@ class CrossEncoderPredictor:
         """
         predictions = []
         
-        for i in tqdm(range(0, len(df), batch_size), desc="Predicting"):
+        total_batches = (len(df) + batch_size - 1) // batch_size
+        for i in tqdm(range(0, len(df), batch_size), 
+                     desc="Predicting", 
+                     total=total_batches,
+                     unit="batch",
+                     ncols=80):
             batch = df.iloc[i:i+batch_size]
             
             # Prepare pair A texts: (anchor, text_a)
@@ -197,9 +205,8 @@ class EnsemblePredictor:
         self.models = []
         
         print(f"Initializing ensemble with {len(model_paths)} models (method: {method})")
-        for i, path in enumerate(model_paths):
-            print(f"  Loading fold {i}: {path}")
-            predictor = CrossEncoderPredictor(path, device=self.device)
+        for path in tqdm(model_paths, desc="Loading fold models", unit="model", ncols=80):
+            predictor = CrossEncoderPredictor(path, device=self.device, verbose=False)
             self.models.append(predictor)
     
     def predict_batch(self, df: pd.DataFrame, batch_size: int = 4) -> List[bool]:
@@ -222,10 +229,9 @@ class EnsemblePredictor:
         
         print(f"\n{'='*60}")
         print(f"Running ensemble inference on {len(df)} samples...")
-        print(f"{'='*60}")
+        print(f"{'='*60}\n")
         
-        for i, predictor in enumerate(self.models):
-            print(f"\n[{i+1}/{len(self.models)}] Processing fold {i} model...")
+        for predictor in tqdm(self.models, desc="Processing fold models", unit="fold", ncols=80):
             # Get raw scores for this model
             scores_a, scores_b = self._get_raw_scores(predictor, df, batch_size)
             all_scores_a.append(scores_a)
@@ -237,8 +243,9 @@ class EnsemblePredictor:
         
         # Average scores across models
         print(f"\nAveraging scores from {len(self.models)} models...")
-        avg_scores_a = torch.tensor(all_scores_a).mean(dim=0)
-        avg_scores_b = torch.tensor(all_scores_b).mean(dim=0)
+        # Stack tensors and average (all_scores_a/b are lists of tensors)
+        avg_scores_a = torch.stack(all_scores_a).mean(dim=0)
+        avg_scores_b = torch.stack(all_scores_b).mean(dim=0)
         
         # Predict based on averaged scores
         predictions = (avg_scores_a > avg_scores_b).cpu().numpy()
@@ -251,10 +258,9 @@ class EnsemblePredictor:
         
         print(f"\n{'='*60}")
         print(f"Running ensemble inference (vote) on {len(df)} samples...")
-        print(f"{'='*60}")
+        print(f"{'='*60}\n")
         
-        for i, predictor in enumerate(self.models):
-            print(f"\n[{i+1}/{len(self.models)}] Processing fold {i} model...")
+        for predictor in tqdm(self.models, desc="Processing fold models", unit="fold", ncols=80):
             preds = predictor.predict_batch(df, batch_size)
             all_predictions.append(preds)
             
@@ -275,7 +281,13 @@ class EnsemblePredictor:
         scores_a_list = []
         scores_b_list = []
         
-        for i in tqdm(range(0, len(df), batch_size), desc="  Processing batches", leave=False):
+        total_batches = (len(df) + batch_size - 1) // batch_size
+        for i in tqdm(range(0, len(df), batch_size), 
+                     desc="  Scoring pairs", 
+                     total=total_batches,
+                     unit="batch",
+                     leave=False,
+                     ncols=80):
             batch = df.iloc[i:i+batch_size]
             
             # Prepare pair texts
@@ -421,6 +433,7 @@ def main():
     
     # Get predictor from Drive models
     print(f"\nInitializing model from Drive...")
+    print("This may take a moment for ensemble mode (loading 5 models)...\n")
     predictor = get_predictor(config)
     
     if predictor:
