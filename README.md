@@ -82,7 +82,7 @@ MyDrive/
 !pip install -q transformers sentence-transformers datasets scikit-learn pyyaml accelerate
 
 # === CELL 2: Clone Repository ===
-REPO_URL = "https://github.com/YOUR_USERNAME/narrative-similarity.git"  # ← CHANGE THIS
+REPO_URL = "https://github.com/ppertuzduran/SEMEVAL2026-TASK4.git"
 !git clone {REPO_URL} /content/project
 %cd /content/project
 
@@ -140,21 +140,122 @@ python scripts/eval_local.py --track both
 
 ---
 
-## 🔄 Updating Code
+## 🔄 Git Workflow & Repository Setup
 
-Modified training code? Just push and pull:
+### First-Time Setup (One-Time)
+
+**1. Configure Git (if not already done):**
+```powershell
+git config --global user.name "Your Name"
+git config --global user.email "your.email@example.com"
+```
+
+**2. Initialize Repository and Connect to GitHub:**
+```powershell
+# Navigate to your project directory
+cd C:\Users\pertu\OneDrive\Documentos\DEV\master\semeval2026-task4\v5.1
+
+# Initialize git (if not already initialized)
+git init
+
+# Add remote repository
+git remote add origin https://github.com/ppertuzduran/SEMEVAL2026-TASK4.git
+
+# Check remote is configured correctly
+git remote -v
+```
+
+**3. First Push (if starting fresh):**
+```powershell
+# Add all files
+git add .
+
+# Create initial commit
+git commit -m "Initial commit: Deep learning approach for narrative similarity"
+
+# Push to GitHub (set upstream)
+git push -u origin main
+```
+
+### Daily Workflow - Pushing Changes
+
+**After making code changes:**
 
 ```powershell
-# Local
-git add .
-git commit -m "Updated training"
-git push
+# Check what files changed
+git status
 
-# Colab
-%cd /content/project
-!git pull
-!python training/train_track_a.py  # Re-run training
+# Add specific files
+git add track_a.py track_b.py config.yaml
+# OR add all changes
+git add .
+
+# Commit with descriptive message
+git commit -m "Fixed indentation and logic errors in track_a.py"
+
+# Push to GitHub
+git push origin main
 ```
+
+### Pulling Updates (Colab or Another Machine)
+
+**In Google Colab:**
+```python
+# Clone repository (first time)
+!git clone https://github.com/ppertuzduran/SEMEVAL2026-TASK4.git /content/project
+%cd /content/project
+
+# Pull latest changes (subsequent times)
+%cd /content/project
+!git pull origin main
+
+# Re-run training with updated code
+!python training/train_track_a.py
+```
+
+**On Local Machine:**
+```powershell
+# Pull latest changes from GitHub
+git pull origin main
+
+# If there are conflicts, resolve them and then:
+git add .
+git commit -m "Resolved merge conflicts"
+git push origin main
+```
+
+### Common Git Commands
+
+```powershell
+# View commit history
+git log --oneline
+
+# Discard local changes (careful!)
+git checkout -- filename.py
+
+# Create a new branch for experiments
+git checkout -b experimental-feature
+
+# Switch back to main branch
+git checkout main
+
+# View differences before committing
+git diff
+
+# Remove file from git (but keep locally)
+git rm --cached filename
+```
+
+### .gitignore (Already Configured)
+
+The following are automatically ignored:
+- `venv311/` - Python virtual environment
+- `models/` - Trained models (too large for git)
+- `output/` - Generated predictions
+- `__pycache__/` - Python cache files
+- `*.pyc` - Compiled Python files
+
+**Note:** Models should be stored in Google Drive, not Git!
 
 ---
 
