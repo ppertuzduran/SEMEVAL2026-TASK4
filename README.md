@@ -4,16 +4,32 @@ Deep learning solution for narrative similarity using cross-encoder (Track A) an
 
 **⚠️ Python 3.11 Required** for local GPU training/inference with CUDA support.
 
-## 🎯 Training Workflow
+## 🎯 Recommended Workflow
 
-**⚡ Train on Google Colab (GPU) → 💻 Inference Locally (CPU/GPU)**
+**⚡ Complete Pipeline on Google Colab + Google Drive**
 
-- Training scripts: Colab-only (optimized for T4 GPU)
-- Inference scripts: Local execution
-- Code: GitHub (version control)
-- Data & Models: Google Drive (persistence)
+```
+GitHub (Code)
+    ↓ clone
+Google Colab (Training) → Google Drive (Models)
+    ↓                          ↓
+Google Colab (Inference) → Google Drive (Results)
+    ↓
+Local Access via Drive for Desktop
+```
 
-**Training Time on Colab T4**: ~1h 15min total
+**Timing:**
+- **Training:** ~1h 15min (Track A + Track B)
+- **Inference:** ~7-9 min (both tracks with ensemble)
+- **Total:** ~1.5 hours on free Colab T4
+
+**Storage:**
+- **Data:** Google Drive (`narrative_similarity/data/`)
+- **Models:** Google Drive (`narrative_similarity/models/`)
+- **Results:** Google Drive (`narrative_similarity/output/`)
+- **Code:** GitHub (version control)
+
+**Alternative:** Local inference on RTX 4050 (~22 min, or 2 min without ensemble)
 
 ---
 
@@ -104,25 +120,98 @@ paths = setup_colab_environment(project_name="narrative_similarity")
 # === CELL 6: Train Track A (~50 min) ===
 !python training/train_track_a.py
 
-# === CELL 7: Download Models (Optional) ===
-!cd /content/drive/MyDrive/narrative_similarity && zip -r /content/trained_models.zip models/
+# === CELL 7: Update Config for Inference Paths ===
+# Update config.yaml to point to Drive paths for inference
+import yaml
+
+with open('/content/project/config.yaml', 'r') as f:
+    config = yaml.safe_load(f)
+
+# Update data paths to Google Drive
+config['data']['dev_track_a'] = '/content/drive/MyDrive/narrative_similarity/data/dev_track_a.jsonl'
+config['data']['dev_track_b'] = '/content/drive/MyDrive/narrative_similarity/data/dev_track_b.jsonl'
+config['data']['output_dir'] = '/content/project/output'  # Local temp, will copy to Drive later
+
+# Update model paths to Google Drive
+config['track_a']['model_save_path'] = '/content/drive/MyDrive/narrative_similarity/models/track_a_cross_encoder'
+config['track_b']['model_save_path'] = '/content/drive/MyDrive/narrative_similarity/models/track_b_embedder'
+
+with open('/content/project/config.yaml', 'w') as f:
+    yaml.dump(config, f, default_flow_style=False)
+
+print("✓ Config updated for inference:")
+print(f"  Data: {config['data']['dev_track_a']}")
+print(f"  Models: {config['track_a']['model_save_path']}")
+
+# === CELL 8: Run Inference on Colab (RECOMMENDED - Faster than Local) ===
+# Track B Inference (~30 seconds)
+!python track_b.py
+
+# Track A Inference (~6-8 minutes for ensemble)
+!python track_a.py
+
+# Evaluate results
+!python scripts/eval_local.py --track both
+
+# === CELL 9: Save Results to Google Drive ===
+# Create output directory in Drive
+!mkdir -p /content/drive/MyDrive/narrative_similarity/output
+
+# Copy inference results to Drive
+!cp -r /content/project/output/* /content/drive/MyDrive/narrative_similarity/output/
+
+# Verify files were saved
+!ls -lh /content/drive/MyDrive/narrative_similarity/output/
+
+print("✓ Results saved to Google Drive:")
+print("  - track_a.jsonl (predictions)")
+print("  - track_b.npy (embeddings)")
+print("  - Access at: MyDrive/narrative_similarity/output/")
+
+# === CELL 10 (Optional): Download Results as ZIP ===
+# Only needed if you DON'T have Google Drive for Desktop
+!cd /content/drive/MyDrive/narrative_similarity/output && zip /content/inference_results.zip *
 from google.colab import files
-files.download('/content/trained_models.zip')
+files.download('/content/inference_results.zip')
 ```
 
-### 4. Get Models Locally
+**⚡ Colab Workflow Timeline:**
+- **Cells 1-3:** Setup (~2 min)
+- **Cells 4-6:** Training (~1h 15min)
+- **Cell 7:** Update config paths (~5 sec) ⚠️ **REQUIRED**
+- **Cell 8:** Inference (~7-9 min)
+- **Cell 9:** Save to Drive (~5 sec)
 
-**Option A: Download from Colab** (Cell 7 above)
-```powershell
-cd C:\Users\pertu\OneDrive\Documentos\DEV\master\V4
-Expand-Archive -Path trained_models.zip -DestinationPath . -Force
-```
+**⚠️ Important:** Cell 7 updates config.yaml to use Google Drive paths. Without this, inference will fail with "file not found" errors.
 
-**Option B: Mount Drive** (Recommended)
+**⚡ Inference Speed:**
+- **Track B:** ~30 seconds (vs. ~2 min local)
+- **Track A Ensemble:** ~6-8 minutes (vs. ~20+ min local on RTX 4050)
+- **Total:** ~7-9 minutes on Colab T4 GPU
+
+**💾 Results Storage:**
+- Results automatically saved to: `MyDrive/narrative_similarity/output/`
+- Access via Google Drive for Desktop or web interface
+- No manual downloads needed!
+
+### 4. Access Results Locally (from Google Drive)
+
+**Recommended: Use Google Drive for Desktop**
+
 1. Install [Google Drive for Desktop](https://www.google.com/drive/download/)
-2. Models auto-sync to: `G:\My Drive\narrative_similarity\models\`
+2. Results auto-sync to your local machine:
+   - **Models:** `G:\My Drive\narrative_similarity\models\`
+   - **Inference results:** `G:\My Drive\narrative_similarity\output\`
+     - `track_a.jsonl` - Track A predictions
+     - `track_b.npy` - Track B embeddings
 
-### 5. Run Inference Locally
+**No manual downloads needed!** Everything syncs automatically.
+
+### 5. Run Inference Locally (Alternative to Colab)
+
+⚠️ **Note:** Inference is **much faster on Colab** (see Cell 7 above). Local inference on RTX 4050 with ensemble can take 20+ minutes.
+
+**If you prefer local inference:**
 
 ```powershell
 # Activate the Python 3.11 virtual environment (if not already activated)
@@ -136,7 +225,13 @@ python track_a.py
 python scripts/eval_local.py --track both
 ```
 
-**Note:** All dependencies should already be installed from step 1. GPU acceleration will be used automatically if available.
+**Speed Comparison (200 samples):**
+| Environment | Track A Ensemble | Track B | Total |
+|------------|------------------|---------|-------|
+| **Colab T4 (16GB)** | 6-8 min | 30 sec | **~7-9 min** ⚡ |
+| Local RTX 4050 (6GB) | 20+ min | 2 min | ~22 min |
+
+**To speed up local inference:** Set `use_ensemble: false` in `config.yaml` (5x faster, ~1-2% lower accuracy)
 
 ---
 
@@ -385,6 +480,24 @@ track_a:
 
 ## 📦 Submission
 
+### From Google Drive (after Colab inference)
+
+**Option 1: Use Drive for Desktop (Recommended)**
+```powershell
+# Results are already synced locally at:
+cd "G:\My Drive\narrative_similarity\output"
+
+# Create submission zip
+Compress-Archive -Path track_a.jsonl,track_b.npy -DestinationPath submission.zip
+```
+
+**Option 2: From Drive Web Interface**
+1. Go to Google Drive → `narrative_similarity/output/`
+2. Select `track_a.jsonl` and `track_b.npy`
+3. Right-click → Download → Files download as zip
+
+### From Local Inference
+
 ```powershell
 # Windows
 Compress-Archive -Path output\* -DestinationPath submission.zip
@@ -393,15 +506,18 @@ Compress-Archive -Path output\* -DestinationPath submission.zip
 zip -j submission.zip output/*
 ```
 
+### Submission Contents
+
 Should contain:
-- `track_a.jsonl` - Predictions
-- `track_b.npy` - Embeddings
+- `track_a.jsonl` - Predictions (200 rows with text_a_is_closer predictions)
+- `track_b.npy` - Embeddings (200 x 768 numpy array)
 
 ---
 
 ## 📖 Documentation
 
 - **[APPROACH.md](APPROACH.md)** - Technical approach and SOTA techniques
+- **[COLAB_INFERENCE.md](COLAB_INFERENCE.md)** - Complete guide for running inference on Colab (recommended)
 
 ---
 
@@ -423,14 +539,29 @@ Should contain:
 
 ---
 
-## 📊 Training Time Comparison
+## 📊 Time Comparison: Colab vs Local
 
-| Environment | Total Time |
-|-------------|------------|
+### Training Time
+| Environment | Training Time |
+|-------------|--------------|
 | **Colab T4 (16GB)** | **71 min** ⚡ |
 | Local RTX 4050 (6GB) | 256 min |
 
-**Speedup: 3.6x faster on Colab**
+**Training Speedup: 3.6x faster on Colab**
+
+### Inference Time (200 samples, with ensemble)
+| Environment | Track A | Track B | Total |
+|-------------|---------|---------|-------|
+| **Colab T4 (16GB)** | **6-8 min** | **30 sec** | **~7-9 min** ⚡ |
+| Local RTX 4050 (6GB) | 20+ min | 2 min | ~22 min |
+
+**Inference Speedup: ~3x faster on Colab**
+
+### Complete Pipeline (Training + Inference)
+- **Colab T4:** ~82 min (~1.4 hours)
+- **Local RTX 4050:** ~278 min (~4.6 hours)
+
+**💡 Recommendation:** Use Colab for both training and inference for best speed!
 
 ---
 

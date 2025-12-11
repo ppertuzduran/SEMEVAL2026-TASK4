@@ -81,30 +81,45 @@ def get_model(use_finetuned: bool = True) -> SentenceTransformer:
 
 def main():
     """Main inference pipeline."""
+    # Load config to get data paths
+    config = load_config()
+    
+    # Determine data paths (from config or default)
+    if config and 'data' in config:
+        track_b_path = config['data'].get('dev_track_b', 'data/dev_track_b.jsonl')
+        track_a_path = config['data'].get('dev_track_a', 'data/dev_track_a.jsonl')
+        output_dir = Path(config['data'].get('output_dir', 'output'))
+    else:
+        track_b_path = 'data/dev_track_b.jsonl'
+        track_a_path = 'data/dev_track_a.jsonl'
+        output_dir = Path('output')
+    
     # Load data
-    data = pd.read_json("data/dev_track_b.jsonl", lines=True)
-    print(f"Loaded {len(data)} texts from Track B")
+    print(f"Loading data from: {track_b_path}")
+    data = pd.read_json(track_b_path, lines=True)
+    print(f"✓ Loaded {len(data)} texts from Track B")
     
     # Load model (fine-tuned if available, otherwise baseline)
     model = get_model(use_finetuned=True)
     
     # Generate embeddings
-    print("Generating embeddings...")
+    print("\nGenerating embeddings...")
     embeddings = model.encode(data["text"], show_progress_bar=True)
     
     # Create lookup for evaluation
     embedding_lookup = dict(zip(data["text"], embeddings))
     
     # Evaluate on Track A
-    accuracy = evaluate("data/dev_track_a.jsonl", embedding_lookup)
-    print(f"Accuracy on Track A dev set: {accuracy:.4f}")
+    print(f"\nEvaluating on Track A dev set: {track_a_path}")
+    accuracy = evaluate(track_a_path, embedding_lookup)
+    print(f"✓ Accuracy on Track A dev set: {accuracy:.4f}")
     
     # Save embeddings
-    output_dir = Path("output")
-    output_dir.mkdir(exist_ok=True)
-    np.save(output_dir / "track_b.npy", embeddings)
-    print(f"Embeddings saved to: {output_dir / 'track_b.npy'}")
-    print(f"Shape: {embeddings.shape}")
+    output_dir.mkdir(exist_ok=True, parents=True)
+    output_path = output_dir / "track_b.npy"
+    np.save(output_path, embeddings)
+    print(f"\n✓ Embeddings saved to: {output_path}")
+    print(f"✓ Shape: {embeddings.shape}")
 
 
 if __name__ == "__main__":

@@ -210,8 +210,12 @@ class EnsemblePredictor:
         all_scores_a = []
         all_scores_b = []
         
+        print(f"\n{'='*60}")
+        print(f"Running ensemble inference on {len(df)} samples...")
+        print(f"{'='*60}")
+        
         for i, predictor in enumerate(self.models):
-            print(f"\nModel {i+1}/{len(self.models)} predictions:")
+            print(f"\n[{i+1}/{len(self.models)}] Processing fold {i} model...")
             # Get raw scores for this model
             scores_a, scores_b = self._get_raw_scores(predictor, df, batch_size)
             all_scores_a.append(scores_a)
@@ -222,19 +226,25 @@ class EnsemblePredictor:
                 torch.cuda.empty_cache()
         
         # Average scores across models
+        print(f"\nAveraging scores from {len(self.models)} models...")
         avg_scores_a = torch.tensor(all_scores_a).mean(dim=0)
         avg_scores_b = torch.tensor(all_scores_b).mean(dim=0)
         
         # Predict based on averaged scores
         predictions = (avg_scores_a > avg_scores_b).cpu().numpy()
+        print(f"✓ Ensemble inference complete!")
         return [bool(p) for p in predictions]
     
     def _predict_vote(self, df: pd.DataFrame, batch_size: int) -> List[bool]:
         """Majority vote on predictions."""
         all_predictions = []
         
+        print(f"\n{'='*60}")
+        print(f"Running ensemble inference (vote) on {len(df)} samples...")
+        print(f"{'='*60}")
+        
         for i, predictor in enumerate(self.models):
-            print(f"\nModel {i+1}/{len(self.models)} predictions:")
+            print(f"\n[{i+1}/{len(self.models)}] Processing fold {i} model...")
             preds = predictor.predict_batch(df, batch_size)
             all_predictions.append(preds)
             
@@ -243,8 +253,10 @@ class EnsemblePredictor:
                 torch.cuda.empty_cache()
         
         # Majority vote
+        print(f"\nComputing majority vote from {len(self.models)} models...")
         all_predictions = torch.tensor(all_predictions, dtype=torch.float)
         ensemble_predictions = (all_predictions.mean(dim=0) > 0.5).cpu().numpy()
+        print(f"✓ Ensemble inference complete!")
         
         return [bool(p) for p in ensemble_predictions]
     
@@ -253,7 +265,7 @@ class EnsemblePredictor:
         scores_a_list = []
         scores_b_list = []
         
-        for i in range(0, len(df), batch_size):
+        for i in tqdm(range(0, len(df), batch_size), desc="  Processing batches", leave=False):
             batch = df.iloc[i:i+batch_size]
             
             # Prepare pair texts
@@ -382,31 +394,55 @@ def predict_with_baseline(df: pd.DataFrame, baseline: str = "random") -> pd.Data
 
 def main():
     """Main inference pipeline."""
+    import time
+    start_time = time.time()
+    
+    print("="*60)
+    print("TRACK A INFERENCE - Narrative Similarity Prediction")
+    print("="*60)
+    
     # Clear GPU cache if available
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
-        print(f"GPU: {torch.cuda.get_device_name(0)}")
-        print(f"GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.2f} GB")
+        print(f"\n✓ GPU: {torch.cuda.get_device_name(0)}")
+        print(f"✓ GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.2f} GB")
+    else:
+        print("\n⚠ Running on CPU (slower)")
     
-    # Load data
-    df = pd.read_json("data/dev_track_a.jsonl", lines=True)
-    print(f"Loaded {len(df)} samples")
-    
-    # Load config
+    # Load config first to get data paths
     config = load_config()
     
+    # Determine data path (from config or default)
+    if config and 'data' in config:
+        track_a_path = config['data'].get('dev_track_a', 'data/dev_track_a.jsonl')
+        output_dir = Path(config['data'].get('output_dir', 'output'))
+    else:
+        track_a_path = 'data/dev_track_a.jsonl'
+        output_dir = Path('output')
+    
+    # Load data
+    print(f"\nLoading data from: {track_a_path}")
+    df = pd.read_json(track_a_path, lines=True)
+    print(f"✓ Loaded {len(df)} samples")
+    
     # Get predictor
+    print(f"\nInitializing model...")
     predictor = None
     if config:
         predictor = get_predictor(config)
     
     if predictor:
         # Use fine-tuned model (reduced batch size for 6GB GPU)
+        print(f"\nStarting inference...")
+        inference_start = time.time()
         predictions = predictor.predict_batch(df, batch_size=4)
+        inference_time = time.time() - inference_start
+        print(f"\n✓ Inference completed in {inference_time:.1f} seconds")
+        print(f"  ({len(df)/inference_time:.1f} samples/sec)")
         df["predicted_text_a_is_closer"] = predictions
     else:
         # Fallback to baseline
-        print("\nFine-tuned model not found!")
+        print("\n⚠ Fine-tuned model not found!")
         print("Falling back to random baseline")
         df = predict_with_baseline(df, baseline="random")
     
@@ -419,14 +455,18 @@ def main():
     del df["predicted_text_a_is_closer"]
 
     # Save results
-    output_dir = Path("output")
-    output_dir.mkdir(exist_ok=True)
+    print(f"\nSaving results...")
+    output_dir.mkdir(exist_ok=True, parents=True)
     output_path = output_dir / "track_a.jsonl"
     
     with open(output_path, 'w') as f:
         f.write(df.to_json(orient='records', lines=True))
     
-    print(f"Predictions saved to: {output_path}")
+    total_time = time.time() - start_time
+    print(f"\n{'='*60}")
+    print(f"✓ Predictions saved to: {output_path}")
+    print(f"✓ Total time: {total_time:.1f} seconds ({total_time/60:.1f} minutes)")
+    print(f"{'='*60}")
 
 
 if __name__ == "__main__":
