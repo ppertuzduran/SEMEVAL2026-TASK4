@@ -126,7 +126,7 @@ class CrossEncoderPredictor:
                      desc="Predicting", 
                      total=total_batches,
                      unit="batch",
-                     ncols=80):
+):
             batch = df.iloc[i:i+batch_size]
             
             # Prepare pair A texts: (anchor, text_a)
@@ -208,7 +208,7 @@ class EnsemblePredictor:
         self.models = []
         
         print(f"Initializing ensemble with {len(model_paths)} models (method: {method})")
-        for path in tqdm(model_paths, desc="Loading fold models", unit="model", ncols=80):
+        for path in tqdm(model_paths, desc="Loading fold models", unit="model"):
             predictor = CrossEncoderPredictor(path, device=self.device, verbose=False, max_length=max_length)
             self.models.append(predictor)
     
@@ -234,7 +234,7 @@ class EnsemblePredictor:
         print(f"Running ensemble inference on {len(df)} samples...")
         print(f"{'='*60}\n")
         
-        for predictor in tqdm(self.models, desc="Processing fold models", unit="fold", ncols=80):
+        for predictor in tqdm(self.models, desc="Processing fold models", unit="fold"):
             # Get raw scores for this model
             scores_a, scores_b = self._get_raw_scores(predictor, df, batch_size)
             all_scores_a.append(scores_a)
@@ -263,7 +263,7 @@ class EnsemblePredictor:
         print(f"Running ensemble inference (vote) on {len(df)} samples...")
         print(f"{'='*60}\n")
         
-        for predictor in tqdm(self.models, desc="Processing fold models", unit="fold", ncols=80):
+        for predictor in tqdm(self.models, desc="Processing fold models", unit="fold"):
             preds = predictor.predict_batch(df, batch_size)
             all_predictions.append(preds)
             
@@ -290,7 +290,7 @@ class EnsemblePredictor:
                      total=total_batches,
                      unit="batch",
                      leave=False,
-                     ncols=80):
+):
             batch = df.iloc[i:i+batch_size]
             
             # Prepare pair texts
