@@ -435,19 +435,27 @@ def main():
 
     # Optional Phase 4: Distillation from Track A cross-encoder (teacher → student)
     if run_distill_only or config['track_b'].get('distill_from_teacher', False):
-        teacher_path = config['track_b'].get('teacher_model_path')
-        print(f"Checking teacher model at: {teacher_path}")
-        if Path(teacher_path).exists():
-            print(f"✓ Teacher model found at {teacher_path}")
+        teacher_paths = config['track_b'].get('teacher_model_paths', [config['track_b'].get('teacher_model_path')])
+        print(f"Checking teacher models: {teacher_paths}")
+        valid_teachers = [p for p in teacher_paths if Path(p).exists()]
+        if valid_teachers:
+            print(f"✓ Found {len(valid_teachers)} teacher models")
         else:
-            print(f"✗ Teacher model NOT found at {teacher_path}")
-        if teacher_path and Path(teacher_path).exists():
+            print("✗ No teacher models found")
+        if valid_teachers:
             print("\n" + "="*60)
-            print("Phase 4: Distillation from Track A cross-encoder...")
+            print(f"Phase 4: Distillation from {len(valid_teachers)} Track A cross-encoders (ensemble teacher)...")
             print("="*60)
-            teacher_tokenizer = AutoTokenizer.from_pretrained(teacher_path)
-            teacher_model = AutoModelForSequenceClassification.from_pretrained(teacher_path).to(device)
-            teacher_model.eval()
+            # Load all teacher models
+            teachers = []
+            teacher_tokenizer = None
+            for path in valid_teachers:
+                tokenizer = AutoTokenizer.from_pretrained(path)
+                model = AutoModelForSequenceClassification.from_pretrained(path).to(device)
+                model.eval()
+                teachers.append(model)
+                if teacher_tokenizer is None:
+                    teacher_tokenizer = tokenizer
 
             distill_bs = config['track_b'].get('batch_size_distill', batch_size)
             distill_dataset = DistillDataset(train_cross_encoder)
@@ -470,7 +478,7 @@ def main():
                     text_b = batch['text_b']
                     labels = batch['label'].to(device, dtype=torch.float)
 
-                    # Teacher logits
+                    # Teacher logits (ensemble average)
                     with torch.no_grad():
                         inputs_a = teacher_tokenizer(
                             [f"{a} {teacher_tokenizer.sep_token} {b}" for a, b in zip(anchor, text_a)],
@@ -488,9 +496,19 @@ def main():
                             return_tensors='pt'
                         )
                         inputs_b = {k: v.to(device) for k, v in inputs_b.items()}
-                        t_a = teacher_model(**inputs_a).logits[:, 1]
-                        t_b = teacher_model(**inputs_b).logits[:, 1]
-                        teacher_scores = torch.stack([t_a, t_b], dim=1) / config['track_b']['distill_temperature']
+
+                        # Average logits across all teacher models
+                        t_a_list = []
+                        t_b_list = []
+                        for teacher in teachers:
+                            t_a = teacher(**inputs_a).logits[:, 1]
+                            t_b = teacher(**inputs_b).logits[:, 1]
+                            t_a_list.append(t_a)
+                            t_b_list.append(t_b)
+                        t_a_avg = torch.stack(t_a_list).mean(dim=0)
+                        t_b_avg = torch.stack(t_b_list).mean(dim=0)
+
+                        teacher_scores = torch.stack([t_a_avg, t_b_avg], dim=1) / config['track_b']['distill_temperature']
                         teacher_probs = F.softmax(teacher_scores, dim=1)
 
                     # Student embeddings
