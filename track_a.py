@@ -467,14 +467,18 @@ def main():
     df["text_a_is_closer"] = df["predicted_text_a_is_closer"]
     del df["predicted_text_a_is_closer"]
 
-    # Save results to Drive
+    # Save results to Drive with LF line endings (Unix format for submission)
     print(f"\nSaving results to Drive...")
     output_dir = Path(config['data']['output_dir'])
     output_dir.mkdir(exist_ok=True, parents=True)
     output_path = output_dir / "track_a.jsonl"
-    
-    with open(output_path, 'w') as f:
-        f.write(df.to_json(orient='records', lines=True))
+
+    # Ensure Unix line endings for submission compatibility
+    jsonl_str = df.to_json(orient='records', lines=True)
+    jsonl_str = jsonl_str.replace('\r\n', '\n').replace('\r', '\n')  # Normalize to LF
+
+    with open(output_path, 'w', newline='\n') as f:
+        f.write(jsonl_str)
     
     total_time = time.time() - start_time
     print(f"\n{'='*60}")
