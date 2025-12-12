@@ -261,12 +261,21 @@ def main():
     # Load base model (shared backbone for both tracks)
     print(f"\nLoading base model: {config['track_b']['base_model']}")
     model = SentenceTransformer(config['track_b']['base_model'], device=device)
+    # Shorten max sequence length to save VRAM (affects tokenizer inside ST)
+    if 'max_seq_length' in config['track_b']:
+        model.max_seq_length = config['track_b']['max_seq_length']
+        print(f"Set SentenceTransformer max_seq_length={model.max_seq_length}")
     if config['track_b'].get('enable_gradient_checkpointing', True):
         try:
             model._first_module().auto_model.gradient_checkpointing_enable()
             print("Enabled gradient checkpointing for memory savings.")
         except Exception as e:
             print(f"Warning: could not enable gradient checkpointing: {e}")
+    try:
+        model._first_module().auto_model.config.use_cache = False
+        print("Disabled transformer cache to reduce memory.")
+    except Exception:
+        pass
     
     # Load prepared data
     prepared_dir = Path(config['data']['prepared_data_dir'])

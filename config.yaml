@@ -19,11 +19,11 @@ track_b:
   base_model: "BAAI/bge-large-en-v1.5"  # High-perf backbone per APPROACH
   model_save_path: "models/track_b_embedder"
   # Training hyperparameters (split by curriculum stages)
-  batch_size: 8
+  batch_size: 6            # global fallback
   batch_size_mnr: 8
-  batch_size_pairwise: 8
-  batch_size_triplet: 8
-  batch_size_distill: 8
+  batch_size_pairwise: 4   # heaviest phase; keep small on T4
+  batch_size_triplet: 6
+  batch_size_distill: 4
   epochs_mnr: 3          # Phase 1: MultipleNegativesRankingLoss
   epochs_pairwise: 4     # Phase 2: PairwiseSoftmaxLoss (metric-aligned)
   epochs_triplet: 3      # Phase 3: TripletLoss with hard negatives
@@ -34,6 +34,7 @@ track_b:
   use_multiple_negatives_ranking: true
   use_pairwise_softmax: true
   temperature: 0.7       # Sharper softmax per APPROACH
+  max_seq_length: 384    # shorten sequences to save VRAM on T4
   # Distillation from Track A cross-encoder (Stage 3 in APPROACH)
   distill_from_teacher: false
   teacher_model_path: "models/track_a_cross_encoder"
