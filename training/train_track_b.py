@@ -260,8 +260,13 @@ def main():
         print(f"GPU: {torch.cuda.get_device_name(0)}")
     
     # Load base model (shared backbone for both tracks)
-    print(f"\nLoading base model: {config['track_b']['base_model']}")
-    model = SentenceTransformer(config['track_b']['base_model'], device=device)
+    run_distill_only = config['track_b'].get('run_distill_only', False)
+    if run_distill_only:
+        print(f"\nLoading pre-trained model for distillation only: {config['track_b']['model_save_path']}")
+        model = SentenceTransformer(config['track_b']['model_save_path'], device=device)
+    else:
+        print(f"\nLoading base model: {config['track_b']['base_model']}")
+        model = SentenceTransformer(config['track_b']['base_model'], device=device)
     # Shorten max sequence length to save VRAM (affects tokenizer inside ST)
     if 'max_seq_length' in config['track_b']:
         model.max_seq_length = config['track_b']['max_seq_length']
@@ -369,7 +374,7 @@ def main():
     evaluator = SequentialEvaluator([base_evaluator])
     
     # Phase 1: MultipleNegativesRankingLoss (global structure)
-    if config['track_b'].get('use_multiple_negatives_ranking', True) and len(pair_examples) > 0:
+    if not run_distill_only and config['track_b'].get('use_multiple_negatives_ranking', True) and len(pair_examples) > 0:
         print("\n" + "="*60)
         print("Phase 1: MultipleNegativesRankingLoss (global structure)...")
         print("="*60)
@@ -389,7 +394,7 @@ def main():
         base_evaluator.best_accuracy = base_evaluator(model, "", 0, 0)
     
     # Phase 2: PairwiseSoftmaxLoss (metric-aligned)
-    if config['track_b'].get('use_pairwise_softmax', True) and len(triple_softmax_examples) > 0:
+    if not run_distill_only and config['track_b'].get('use_pairwise_softmax', True) and len(triple_softmax_examples) > 0:
         print("\n" + "="*60)
         print("Phase 2: PairwiseSoftmaxLoss (metric aligned)...")
         print("="*60)
@@ -409,7 +414,7 @@ def main():
         base_evaluator.best_accuracy = base_evaluator(model, "", 0, 0)
         
     # Phase 3: TripletLoss (fine-grained discrimination)
-    if len(triplet_examples) > 0:
+    if not run_distill_only and len(triplet_examples) > 0:
         print("\n" + "="*60)
         print("Phase 3: TripletLoss (fine-grained)...")
         print("="*60)
@@ -429,7 +434,7 @@ def main():
         base_evaluator.best_accuracy = base_evaluator(model, "", 0, 0)
 
     # Optional Phase 4: Distillation from Track A cross-encoder (teacher → student)
-    if config['track_b'].get('distill_from_teacher', False):
+    if run_distill_only or config['track_b'].get('distill_from_teacher', False):
         teacher_path = config['track_b'].get('teacher_model_path')
         print(f"Checking teacher model at: {teacher_path}")
         if Path(teacher_path).exists():
