@@ -26,6 +26,7 @@ import torch.nn.functional as F
 import yaml
 from torch.utils.data import DataLoader, Dataset
 from sentence_transformers import SentenceTransformer, InputExample, losses
+from sentence_transformers.evaluation import SequentialEvaluator
 from tqdm import tqdm
 import pandas as pd
 from sentence_transformers.util import cos_sim
@@ -360,11 +361,12 @@ def main():
     warmup_steps = config['track_b']['warmup_steps']
     
     # Setup evaluator
-    evaluator = CustomEvaluator(
+    base_evaluator = CustomEvaluator(
         dev_path=config['data']['dev_track_a'],
         device=device,
         save_path=config['track_b']['model_save_path']
     )
+    evaluator = SequentialEvaluator([base_evaluator])
     
     # Phase 1: MultipleNegativesRankingLoss (global structure)
     if config['track_b'].get('use_multiple_negatives_ranking', True) and len(pair_examples) > 0:
@@ -384,7 +386,7 @@ def main():
             use_amp=config['track_b']['mixed_precision']
         )
         model = SentenceTransformer(config['track_b']['model_save_path'], device=device)
-        evaluator.best_accuracy = evaluator(model, "", 0, 0)
+        base_evaluator.best_accuracy = base_evaluator(model, "", 0, 0)
     
     # Phase 2: PairwiseSoftmaxLoss (metric-aligned)
     if config['track_b'].get('use_pairwise_softmax', True) and len(triple_softmax_examples) > 0:
@@ -404,7 +406,7 @@ def main():
             use_amp=config['track_b']['mixed_precision']
         )
         model = SentenceTransformer(config['track_b']['model_save_path'], device=device)
-        evaluator.best_accuracy = evaluator(model, "", 0, 0)
+        base_evaluator.best_accuracy = base_evaluator(model, "", 0, 0)
         
     # Phase 3: TripletLoss (fine-grained discrimination)
     if len(triplet_examples) > 0:
@@ -424,7 +426,7 @@ def main():
             use_amp=config['track_b']['mixed_precision']
         )
         model = SentenceTransformer(config['track_b']['model_save_path'], device=device)
-        evaluator.best_accuracy = evaluator(model, "", 0, 0)
+        base_evaluator.best_accuracy = base_evaluator(model, "", 0, 0)
 
     # Optional Phase 4: Distillation from Track A cross-encoder (teacher → student)
     if config['track_b'].get('distill_from_teacher', False):
@@ -508,7 +510,7 @@ def main():
 
             # Save distilled model
             model.save(config['track_b']['model_save_path'])
-            evaluator.best_accuracy = evaluator(model, "", 0, 0)
+            base_evaluator.best_accuracy = base_evaluator(model, "", 0, 0)
         else:
             print("Distillation skipped: teacher model not found.")
     
