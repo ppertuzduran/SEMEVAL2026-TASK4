@@ -42,21 +42,21 @@ This creates a single strong narrative representation backbone serving both trac
 
 ### 3.1. Track B Base Encoder
 
-- **Model:** `BAAI/bge-large-en-v1.5`  
-- **Embedding dimension:** 1024 (well within the 8192 limit).  
+- **Model:** `BAAI/bge-large-en-v1.5` (high-performance backbone, 1B params, 1024-dim embeddings).
+- **Embedding dimension:** 1024 (well within the 8192 limit).
 - **Tokenization and pooling:** use the official BGE settings (CLS pooling with L2-normalization of final embeddings).
+- **Max sequence length:** 384 (shortened for VRAM efficiency on T4 GPUs).
 
 ### 3.2. Track A Cross-Encoder
 
-- **Encoder backbone:** initialized from the **fine-tuned Track B bi-encoder weights** (same transformer encoder).  
+- **Encoder backbone:** initialized from the **fine-tuned Track B bi-encoder weights** (same BGE-large transformer encoder).
 - **Architecture:**
-  - Input: concatenation of texts with explicit markers, e.g.  
-    `[ANCHOR] anchor_text [/ANCHOR] [CAND] candidate_text [/CAND]`
+  - Input: concatenation of texts with separator token, e.g., `anchor_text [SEP] candidate_text`.
   - Encode with the shared transformer.
-  - Take a pooled representation (CLS or mean-pool over all tokens).
-  - Pass through a small feed-forward head to produce a scalar **score(anchor, candidate)**.
-
-The same encoder backbone parameters are shared conceptually between Track A and Track B (with different heads), encouraging the system to learn a consistent narrative space.
+  - Take CLS representation.
+  - Pass through a binary classification head to produce **logits** for similarity scoring.
+- **Max sequence length:** 512.
+- **Data augmentation:** Swap A/B pairs to create symmetric samples for position invariance.
 
 ---
 
@@ -105,10 +105,10 @@ Use a **multi-phase curriculum** to shape the embedding space:
      - For each anchor, find nearest neighbors which are not labeled as positives.
    - Build triplets `(anchor, positive, hard_negative)` and train with TripletLoss, margin tuned on validation.
 
-Phase durations can be tuned empirically, but a practical rule is:
-- 30–40% epochs for Phase 1,
-- 30–40% for Phase 2,
-- 20–30% for Phase 3.
+Phase durations are tuned empirically:
+- Phase 1: 3 epochs (MultipleNegativesRankingLoss).
+- Phase 2: 4 epochs (PairwiseSoftmaxLoss with temperature 0.7).
+- Phase 3: 3 epochs (TripletLoss with margin 0.5).
 
 ### 5.3. Regularization and Optimization
 
@@ -153,17 +153,17 @@ To ensure Track A does not drift arbitrarily far from the embedding-based behavi
    - Bi-encoder (Track B) gives cosine similarities:
      - `sim_A = cosine_B(anchor, A)`
      - `sim_B = cosine_B(anchor, B)`
-   - Normalize them into a soft distribution with temperature `τ_B`:
-     - `p_B = softmax([sim_A, sim_B] / τ_B)`
-2. Cross-encoder produces logits `[score_A, score_B]` and a soft distribution `p_A = softmax([score_A, score_B] / τ_B)`.
+   - Normalize them into a soft distribution with temperature `τ = 0.7`:
+     - `p_B = softmax([sim_A, sim_B] / τ)`
+2. Cross-encoder produces logits `[score_A, score_B]` and a soft distribution `p_A = softmax([score_A, score_B] / τ)`.
 3. Add a **KL-divergence distillation loss**:
    - `loss_distill_B_to_A = KL(p_B || p_A)`
 
 Total loss for Track A:
 
-`loss_A = loss_cls + λ_BA * loss_distill_B_to_A`
+`loss_A = loss_cls + λ * loss_distill_B_to_A`
 
-where `λ_BA` controls the strength of the distillation from Track B to Track A.
+where `λ = 0.3` controls the strength of the distillation from Track B to Track A.
 
 This uses the bi-encoder as a **prior** that stabilizes the cross-encoder, especially at the beginning of training.
 
@@ -175,29 +175,31 @@ Once the Track A cross-encoder is strong (it typically becomes the more accurate
 
 ### 7.1. Teacher–Student Setup
 
-- **Teacher:** Track A cross-encoder (frozen during this phase, or updated slowly).
+- **Teacher:** Ensemble of all Track A cross-encoder folds (5 models) for robust distillation.
 - **Student:** Track B bi-encoder.
 
 For each triple `(anchor, A, B)`:
 
-1. Teacher computes:
-   - `t_A = score_A_teacher(anchor, A)`
-   - `t_B = score_B_teacher(anchor, B)`
-   - `p_T = softmax([t_A, t_B] / τ_T)`
+1. Teacher ensemble computes (average logits across folds):
+   - `t_A = avg(score_A_teacher_fold0, score_A_teacher_fold1, ..., score_A_teacher_fold4)`
+   - `t_B = avg(score_B_teacher_fold0, score_B_teacher_fold1, ..., score_B_teacher_fold4)`
+   - `p_T = softmax([t_A, t_B] / τ)`
 
 2. Student bi-encoder computes:
    - `sim_A = cosine_B(anchor, A)`
    - `sim_B = cosine_B(anchor, B)`
-   - `p_S = softmax([sim_A, sim_B] / τ_T)`
+   - `p_S = softmax([sim_A, sim_B] / τ)`
 
 3. Distillation loss:
    - `loss_T_to_B = KL(p_T || p_S)`
 
-Optionally combine with the original supervised PairwiseSoftmaxLoss:
+Combine with the original supervised PairwiseSoftmaxLoss:
 
-`loss_B_total = loss_pairwise + λ_TB * loss_T_to_B`
+`loss_B_total = loss_pairwise + λ * loss_T_to_B`
 
-This forces the embedding-based model to mimic the finer-grained judgments of the cross-encoder while preserving its ability to embed stories independently.
+where `τ = 0.7` and `λ = 0.5` for stronger distillation.
+
+This forces the embedding-based model to mimic the ensemble's finer-grained judgments while preserving independent embedding capability.
 
 ### 7.2. Hard-Example Focus
 
@@ -219,13 +221,11 @@ This “mutual teaching” can be done for a small number of cycles, each time r
 ### 8.2. Ensembling Strategies
 
 - **Track A (Cross-Encoder):**
-  - Train **K folds** with different seeds and data splits.
-  - At inference, compute logits for each fold and **average** them before decision.
+  - Train **5 folds** with different data splits.
+  - At inference, load all fold models and **average logits** across them before decision (better calibration than voting).
 - **Track B (Bi-Encoder):**
-  - Train multiple variants of the same `bge-large-en-v1.5` model (different seeds, small config changes).
-  - At inference, either:
-    - **Average** embeddings from all models, or
-    - **Concatenate** embeddings (still within the 8192 dimension limit), then L2-normalize the result.
+  - Single model with distillation refinement.
+  - Embeddings computed independently per story (constraint respected).
 
 Ensembling is especially powerful in small/medium datasets and typically yields a noticeable boost in accuracy.
 
@@ -254,10 +254,9 @@ Ensembling is especially powerful in small/medium datasets and typically yields 
 
 ## 10. Summary of the Distillation-Based Approach
 
-1. **Train a strong Track B bi-encoder** using `BAAI/bge-large-en-v1.5` with a curriculum of MultipleNegativesRankingLoss → PairwiseSoftmaxLoss → TripletLoss and hard-negative mining.
-2. **Initialize Track A cross-encoder** from the Track B backbone and train it on triple classification with symmetric augmentation and temperature-scaled CrossEntropy.
-3. **Regularize Track A** with a distillation signal from the bi-encoder (Track B → Track A) to stabilize training.
-4. **Refine Track B** by distilling from the stronger Track A cross-encoder (Track A → Track B), aligning embeddings with the cross-encoder’s decisions.
-5. **Use ensembling** for both tracks and, optionally, iterative mutual refinement to squeeze out additional performance.
+1. **Train a strong Track B bi-encoder** using `BAAI/bge-large-en-v1.5` with a 3-phase curriculum: 3 epochs MNR → 4 epochs PairwiseSoftmax (τ=0.7) → 3 epochs TripletLoss (margin=0.5).
+2. **Initialize Track A cross-encoder** from the Track B backbone and train it on triple classification with swap augmentation, temperature-scaled CrossEntropy (τ=0.7), and B→A distillation regularization (λ=0.3).
+3. **Refine Track B** by distilling from the ensemble of Track A folds (A→B distillation, λ=0.5, τ=0.7), aligning embeddings with cross-encoder decisions.
+4. **Use ensembling** for Track A (5-fold logit averaging) and single distilled model for Track B.
 
-This setup leverages a **shared encoder** and **two-way distillation** to make Tracks A and B reinforce each other, while strictly respecting the constraint that Track B embeddings at inference time are computed independently per story.
+This setup leverages a **shared BGE-large backbone** and **two-way distillation** to make Tracks A and B reinforce each other, while respecting Track B's independent embedding constraint.
