@@ -36,8 +36,8 @@ track_b:
   temperature: 0.7       # Sharper softmax per APPROACH
   max_seq_length: 384    # shorten sequences to save VRAM on T4
   # Distillation from Track A cross-encoder (Stage 3 in APPROACH)
-  distill_from_teacher: false
-  teacher_model_path: "models/track_a_cross_encoder"
+  distill_from_teacher: true
+  teacher_model_path: "/content/drive/MyDrive/narrative_similarity/models/track_a_cross_encoder_fold4"  # Use fold 0 as teacher (update to desired fold)
   distill_weight: 0.3
   distill_temperature: 0.7
   # Training options
