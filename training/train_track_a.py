@@ -76,7 +76,6 @@ class NarrativeSimilarityDataset(Dataset):
     
     Each sample returns both pairs for a triple.
     """
-    
     def __init__(self, data: List[Dict], tokenizer, max_length: int = 512):
         self.data = data
         self.tokenizer = tokenizer
@@ -543,9 +542,9 @@ def train_with_kfold(config: dict):
         print(f"Fold {result['fold']}: Val Acc = {result['val_accuracy']:.4f}")
     
     if fold_results:
-    mean_acc = np.mean([r['val_accuracy'] for r in fold_results])
-    std_acc = np.std([r['val_accuracy'] for r in fold_results])
-    print(f"\nMean Accuracy: {mean_acc:.4f} ± {std_acc:.4f}")
+        mean_acc = np.mean([r['val_accuracy'] for r in fold_results])
+        std_acc = np.std([r['val_accuracy'] for r in fold_results])
+        print(f"\nMean Accuracy: {mean_acc:.4f} ± {std_acc:.4f}")
     
     # Save results
     results_path = Path(config['track_a']['model_save_path']).parent / "kfold_results.json"
