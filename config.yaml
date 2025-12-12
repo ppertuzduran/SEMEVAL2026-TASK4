@@ -52,7 +52,7 @@ track_a:
   base_model: "BAAI/bge-large-en-v1.5"  # Share backbone with Track B
   model_save_path: "models/track_a_cross_encoder"
   # Training hyperparameters
-  batch_size: 4  # Pairwise scoring doubles inputs; adjust for large model
+  batch_size: 2  # Reduced for OOM on T4; pairwise scoring doubles inputs
   epochs: 5
   learning_rate: 1.0e-5
   warmup_ratio: 0.1
@@ -71,11 +71,14 @@ track_a:
   mixed_precision: true
   gradient_clip: 1.0
   eval_steps: 50
+  enable_gradient_checkpointing: true  # Added to save VRAM on T4
   use_kfold: true
   n_folds: 5
   # Ensemble settings
   use_ensemble: true
   ensemble_method: "average"
+  # To run only specific folds (0-based), set e.g. [4] for fold 5 only
+  folds_to_train: [4]  # Set to [4] for fold 5 only, null for all
 
 # Data augmentation
 augmentation:

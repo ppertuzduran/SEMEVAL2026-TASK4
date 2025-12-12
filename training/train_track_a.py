@@ -376,6 +376,13 @@ def train_single_model(
         num_labels=config['track_a']['num_labels'],
         trust_remote_code=True
     )
+    # Enable gradient checkpointing to save VRAM
+    if config['track_a'].get('enable_gradient_checkpointing', False):
+        try:
+            model.base_model.gradient_checkpointing_enable()
+            print("Enabled gradient checkpointing for memory savings.")
+        except Exception as e:
+            print(f"Warning: could not enable gradient checkpointing: {e}")
     # Optionally initialize backbone from Track B
     maybe_init_from_biencoder(model, config['track_a'].get('teacher_biencoder_path'))
     model.to(device)
@@ -488,24 +495,32 @@ def train_with_kfold(config: dict):
     # Load data
     prepared_dir = Path(config['data']['prepared_data_dir'])
     all_data = load_cross_encoder_data(prepared_dir / "cross_encoder_data.jsonl")
-    
+
     # Load k-fold splits
     with open(prepared_dir / "kfold_splits.json", 'r') as f:
         splits = json.load(f)
-    
-    print(f"Training with {len(splits)}-fold cross-validation")
-    
+
+    # Get folds to train (default: all)
+    folds_to_train = config['track_a'].get('folds_to_train')
+    if folds_to_train is None:
+        folds_to_train = list(range(len(splits)))
+
+    print(f"Training with {len(splits)}-fold cross-validation (running folds: {folds_to_train})")
+
     fold_results = []
-    
+
     for fold_idx, (train_indices, val_indices) in enumerate(splits):
+        if fold_idx not in folds_to_train:
+            continue
+
         print(f"\n{'='*60}")
         print(f"Fold {fold_idx + 1}/{len(splits)}")
         print(f"{'='*60}")
-        
+
         # Split data
         train_data = [all_data[i] for i in train_indices]
         val_data = [all_data[i] for i in val_indices]
-        
+
         # Train
         val_acc, model_path = train_single_model(
             train_data,
@@ -513,30 +528,31 @@ def train_with_kfold(config: dict):
             config,
             fold=fold_idx
         )
-        
+
         fold_results.append({
             'fold': fold_idx,
             'val_accuracy': val_acc,
             'model_path': model_path
         })
-    
+
     # Print summary
     print(f"\n{'='*60}")
     print("K-Fold Cross-Validation Results")
     print(f"{'='*60}")
     for result in fold_results:
         print(f"Fold {result['fold']}: Val Acc = {result['val_accuracy']:.4f}")
-    
-    mean_acc = np.mean([r['val_accuracy'] for r in fold_results])
-    std_acc = np.std([r['val_accuracy'] for r in fold_results])
-    print(f"\nMean Accuracy: {mean_acc:.4f} ± {std_acc:.4f}")
-    
+
+    if fold_results:
+        mean_acc = np.mean([r['val_accuracy'] for r in fold_results])
+        std_acc = np.std([r['val_accuracy'] for r in fold_results])
+        print(f"\nMean Accuracy: {mean_acc:.4f} ± {std_acc:.4f}")
+
     # Save results
     results_path = Path(config['track_a']['model_save_path']).parent / "kfold_results.json"
     with open(results_path, 'w') as f:
         json.dump(fold_results, f, indent=2)
     print(f"\nResults saved to: {results_path}")
-    
+
     return fold_results
 
 
