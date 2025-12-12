@@ -451,9 +451,9 @@ def main():
             teacher_tokenizer = None
             for path in valid_teachers:
                 tokenizer = AutoTokenizer.from_pretrained(path)
-                model = AutoModelForSequenceClassification.from_pretrained(path).to(device)
-                model.eval()
-                teachers.append(model)
+                teacher_model = AutoModelForSequenceClassification.from_pretrained(path).to(device)
+                teacher_model.eval()
+                teachers.append(teacher_model)
                 if teacher_tokenizer is None:
                     teacher_tokenizer = tokenizer
 
@@ -500,9 +500,9 @@ def main():
                         # Average logits across all teacher models
                         t_a_list = []
                         t_b_list = []
-                        for teacher in teachers:
-                            t_a = teacher(**inputs_a).logits[:, 1]
-                            t_b = teacher(**inputs_b).logits[:, 1]
+                        for teacher_model in teachers:
+                            t_a = teacher_model(**inputs_a).logits[:, 1]
+                            t_b = teacher_model(**inputs_b).logits[:, 1]
                             t_a_list.append(t_a)
                             t_b_list.append(t_b)
                         t_a_avg = torch.stack(t_a_list).mean(dim=0)
