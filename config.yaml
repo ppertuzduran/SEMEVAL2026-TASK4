@@ -78,7 +78,7 @@ track_a:
   use_ensemble: true
   ensemble_method: "average"
   # To run only specific folds (0-based), set e.g. [4] for fold 5 only
-  folds_to_train: [4]  # Set to [4] for fold 5 only, null for all
+  folds_to_train: null  # null means train all folds
 
 # Data augmentation
 augmentation:
