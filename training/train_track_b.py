@@ -372,8 +372,7 @@ def main():
             evaluator=evaluator,
             output_path=config['track_b']['model_save_path'] + "_mnr",
             save_best_model=False,
-            use_amp=config['track_b']['mixed_precision'],
-            gradient_accumulation_steps=config['track_b'].get('grad_accum_steps', 1)
+            use_amp=config['track_b']['mixed_precision']
         )
         model = SentenceTransformer(config['track_b']['model_save_path'], device=device)
         evaluator.best_accuracy = evaluator(model, "", 0, 0)
@@ -393,8 +392,7 @@ def main():
             evaluator=evaluator,
             output_path=config['track_b']['model_save_path'] + "_pairwise",
             save_best_model=False,
-            use_amp=config['track_b']['mixed_precision'],
-            gradient_accumulation_steps=config['track_b'].get('grad_accum_steps', 1)
+            use_amp=config['track_b']['mixed_precision']
         )
         model = SentenceTransformer(config['track_b']['model_save_path'], device=device)
         evaluator.best_accuracy = evaluator(model, "", 0, 0)
@@ -414,8 +412,7 @@ def main():
             evaluator=evaluator,
             output_path=config['track_b']['model_save_path'] + "_triplet",
             save_best_model=False,
-            use_amp=config['track_b']['mixed_precision'],
-            gradient_accumulation_steps=config['track_b'].get('grad_accum_steps', 1)
+            use_amp=config['track_b']['mixed_precision']
         )
         model = SentenceTransformer(config['track_b']['model_save_path'], device=device)
         evaluator.best_accuracy = evaluator(model, "", 0, 0)
