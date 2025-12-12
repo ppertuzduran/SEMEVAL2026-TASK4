@@ -21,6 +21,7 @@ from typing import Dict, List, Tuple
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 from torch.optim import AdamW
 from transformers import (
@@ -29,6 +30,7 @@ from transformers import (
     get_linear_schedule_with_warmup,
     get_cosine_schedule_with_warmup
 )
+from sentence_transformers import SentenceTransformer
 from tqdm import tqdm
 import yaml
 import pandas as pd
@@ -48,6 +50,21 @@ def load_config(config_path: str = "config.yaml") -> dict:
     """Load configuration."""
     with open(config_path, 'r') as f:
         return yaml.safe_load(f)
+
+
+def maybe_init_from_biencoder(model, biencoder_path: str):
+    """Optionally initialize backbone from Track B encoder weights."""
+    if not biencoder_path or not Path(biencoder_path).exists():
+        return
+    try:
+        biencoder = SentenceTransformer(biencoder_path)
+        encoder_state = biencoder._first_module().auto_model.state_dict()
+        base_attr = getattr(model, model.base_model_prefix, None)
+        if base_attr:
+            base_attr.load_state_dict(encoder_state, strict=False)
+            print(f"Loaded backbone weights from {biencoder_path}")
+    except Exception as e:
+        print(f"Warning: could not load backbone from bi-encoder ({biencoder_path}): {e}")
 
 
 class NarrativeSimilarityDataset(Dataset):
@@ -72,7 +89,6 @@ class NarrativeSimilarityDataset(Dataset):
         item = self.data[idx]
         
         # Pairwise scoring: encode (anchor, text_a) and (anchor, text_b) separately
-        # Pair A: anchor + text_a
         text_a_pair = f"{item['anchor']} {self.tokenizer.sep_token} {item['text_a']}"
         encoding_a = self.tokenizer(
             text_a_pair,
@@ -82,7 +98,6 @@ class NarrativeSimilarityDataset(Dataset):
             return_tensors='pt'
         )
         
-        # Pair B: anchor + text_b
         text_b_pair = f"{item['anchor']} {self.tokenizer.sep_token} {item['text_b']}"
         encoding_b = self.tokenizer(
             text_b_pair,
@@ -97,7 +112,10 @@ class NarrativeSimilarityDataset(Dataset):
             'attention_mask_a': encoding_a['attention_mask'].squeeze(0),
             'input_ids_b': encoding_b['input_ids'].squeeze(0),
             'attention_mask_b': encoding_b['attention_mask'].squeeze(0),
-            'labels': torch.tensor(item['label'], dtype=torch.long)
+            'labels': torch.tensor(item['label'], dtype=torch.long),
+            'anchor_text': item['anchor'],
+            'text_a_raw': item['text_a'],
+            'text_b_raw': item['text_b']
         }
 
 
@@ -110,7 +128,48 @@ def load_cross_encoder_data(path: str) -> List[Dict]:
     return data
 
 
-def train_epoch(model, dataloader, optimizer, scheduler, device, use_amp=True, clip_value=1.0, label_smoothing=0.0, temperature=1.0):
+def augment_swap(data: List[Dict], enable: bool) -> List[Dict]:
+    """Duplicate samples with A/B swapped when enabled."""
+    if not enable:
+        return data
+    augmented = []
+    for item in data:
+        augmented.append(item)
+        augmented.append({
+            'anchor': item['anchor'],
+            'text_a': item['text_b'],
+            'text_b': item['text_a'],
+            'label': 1 - item['label']
+        })
+    return augmented
+
+
+def load_teacher_biencoder(config: dict, device: str):
+    """Load Track B bi-encoder for distillation prior if configured."""
+    if not config['track_a'].get('distill_from_biencoder', False):
+        return None
+    path = config['track_a'].get('teacher_biencoder_path')
+    if path and Path(path).exists():
+        print(f"Loading teacher bi-encoder from {path} for distillation...")
+        return SentenceTransformer(path, device=device)
+    print("Distillation teacher not found; skipping distill regularizer.")
+    return None
+
+
+def train_epoch(
+    model,
+    dataloader,
+    optimizer,
+    scheduler,
+    device,
+    use_amp=True,
+    clip_value=1.0,
+    label_smoothing=0.0,
+    temperature=1.0,
+    distill_model: SentenceTransformer = None,
+    distill_weight: float = 0.0,
+    distill_temperature: float = 1.0
+):
     """
     Train for one epoch with pairwise scoring.
     
@@ -127,6 +186,7 @@ def train_epoch(model, dataloader, optimizer, scheduler, device, use_amp=True, c
     
     scaler = torch.cuda.amp.GradScaler() if use_amp else None
     loss_fn = nn.CrossEntropyLoss(label_smoothing=label_smoothing)
+    kl_loss = nn.KLDivLoss(reduction='batchmean') if distill_model and distill_weight > 0 else None
     
     pbar = tqdm(dataloader, desc="Training")
     for batch in pbar:
@@ -136,10 +196,13 @@ def train_epoch(model, dataloader, optimizer, scheduler, device, use_amp=True, c
         input_ids_b = batch['input_ids_b'].to(device)
         attention_mask_b = batch['attention_mask_b'].to(device)
         labels = batch['labels'].to(device)
+        anchor_texts = batch['anchor_text']
+        text_a_raw = batch['text_a_raw']
+        text_b_raw = batch['text_b_raw']
         
         optimizer.zero_grad()
         
-        if use_amp and device == 'cuda':
+        if use_amp and device.startswith('cuda'):
             with torch.cuda.amp.autocast():
                 # Score pair A: (anchor, text_a)
                 outputs_a = model(
@@ -155,15 +218,21 @@ def train_epoch(model, dataloader, optimizer, scheduler, device, use_amp=True, c
                 )
                 score_b = outputs_b.logits[:, 1]  # Take positive class logit as score
                 
-                # Stack scores and apply temperature scaling
-                scores = torch.stack([score_a, score_b], dim=1)  # Shape: (batch, 2)
-                scores = scores / temperature  # Temperature scaling: < 1.0 sharpens distribution
-                
-                # Label: 1 if A is closer (index 0), 0 if B is closer (index 1)
-                # Need to invert: if label=1, target should be index 0 (score_a)
-                targets = (1 - labels).long()  # Invert: 1→0, 0→1
-                
+                scores = torch.stack([score_a, score_b], dim=1)
+                scores = scores / temperature
+                targets = (1 - labels).long()
                 loss = loss_fn(scores, targets)
+                if distill_model and kl_loss:
+                    with torch.no_grad():
+                        anchor_emb = distill_model.encode(anchor_texts, convert_to_tensor=True, device=device)
+                        a_emb = distill_model.encode(text_a_raw, convert_to_tensor=True, device=device)
+                        b_emb = distill_model.encode(text_b_raw, convert_to_tensor=True, device=device)
+                        sim_a = F.cosine_similarity(anchor_emb, a_emb, dim=1)
+                        sim_b = F.cosine_similarity(anchor_emb, b_emb, dim=1)
+                        teacher_scores = torch.stack([sim_a, sim_b], dim=1) / distill_temperature
+                        teacher_probs = F.softmax(teacher_scores, dim=1)
+                    student_log_probs = F.log_softmax(scores / distill_temperature, dim=1)
+                    loss = loss + distill_weight * kl_loss(student_log_probs, teacher_probs)
             
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
@@ -185,11 +254,21 @@ def train_epoch(model, dataloader, optimizer, scheduler, device, use_amp=True, c
             )
             score_b = outputs_b.logits[:, 1]
             
-            # Compute loss with temperature scaling
             scores = torch.stack([score_a, score_b], dim=1)
-            scores = scores / temperature  # Temperature scaling
+            scores = scores / temperature
             targets = (1 - labels).long()
             loss = loss_fn(scores, targets)
+            if distill_model and kl_loss:
+                with torch.no_grad():
+                    anchor_emb = distill_model.encode(anchor_texts, convert_to_tensor=True, device=device)
+                    a_emb = distill_model.encode(text_a_raw, convert_to_tensor=True, device=device)
+                    b_emb = distill_model.encode(text_b_raw, convert_to_tensor=True, device=device)
+                    sim_a = F.cosine_similarity(anchor_emb, a_emb, dim=1)
+                    sim_b = F.cosine_similarity(anchor_emb, b_emb, dim=1)
+                    teacher_scores = torch.stack([sim_a, sim_b], dim=1) / distill_temperature
+                    teacher_probs = F.softmax(teacher_scores, dim=1)
+                student_log_probs = F.log_softmax(scores / distill_temperature, dim=1)
+                loss = loss + distill_weight * kl_loss(student_log_probs, teacher_probs)
             
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), clip_value)
@@ -272,6 +351,9 @@ def train_single_model(
     """
     device = config['device'] if torch.cuda.is_available() else 'cpu'
     
+    # Apply swap augmentation if enabled
+    train_data = augment_swap(train_data, config.get('augmentation', {}).get('swap_ab', False))
+    
     # Load tokenizer and model
     print(f"\nLoading model: {config['track_a']['base_model']}")
     try:
@@ -294,6 +376,8 @@ def train_single_model(
         num_labels=config['track_a']['num_labels'],
         trust_remote_code=True
     )
+    # Optionally initialize backbone from Track B
+    maybe_init_from_biencoder(model, config['track_a'].get('teacher_biencoder_path'))
     model.to(device)
     
     # Create datasets
@@ -349,6 +433,9 @@ def train_single_model(
     print(f"\nStarting training{' for fold ' + str(fold) if fold is not None else ''}...")
     print(f"Train samples: {len(train_data)}, Val samples: {len(val_data)}")
     
+    # Distillation teacher
+    distill_teacher = load_teacher_biencoder(config, device)
+    
     for epoch in range(config['track_a']['epochs']):
         print(f"\nEpoch {epoch + 1}/{config['track_a']['epochs']}")
         
@@ -362,7 +449,10 @@ def train_single_model(
             use_amp=config['track_a']['mixed_precision'],
             clip_value=config['track_a']['gradient_clip'],
             label_smoothing=config['track_a'].get('label_smoothing', 0.0),
-            temperature=config['track_a'].get('temperature', 1.0)
+            temperature=config['track_a'].get('temperature', 1.0),
+            distill_model=distill_teacher,
+            distill_weight=config['track_a'].get('distill_weight', 0.0),
+            distill_temperature=config['track_a'].get('distill_temperature', 1.0)
         )
         
         # Evaluate

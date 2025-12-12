@@ -16,23 +16,25 @@ data:
 
 # Track B - Bi-encoder settings
 track_b:
-  base_model: "BAAI/bge-base-en-v1.5"  # Options: BAAI/bge-base-en-v1.5, BAAI/bge-large-en-v1.5, intfloat/e5-large-v2
-  # RECOMMENDED: Upgrade to bge-large-en-v1.5 for better quality (1024-dim, reduce batch_size to 16)
+  base_model: "BAAI/bge-large-en-v1.5"  # High-perf backbone per APPROACH
   model_save_path: "models/track_b_embedder"
-  
-  # Training hyperparameters
-  batch_size: 24  # For base model. Use 16 for large model
-  epochs: 10  # Total epochs split across phases
-  learning_rate: 1.0e-5  # Lower LR for fine-tuning pretrained embedders
-  warmup_steps: 100
+  # Training hyperparameters (split by curriculum stages)
+  batch_size: 16
+  epochs_mnr: 3          # Phase 1: MultipleNegativesRankingLoss
+  epochs_pairwise: 4     # Phase 2: PairwiseSoftmaxLoss (metric-aligned)
+  epochs_triplet: 3      # Phase 3: TripletLoss with hard negatives
+  learning_rate: 1.0e-5
+  warmup_steps: 500
   weight_decay: 0.01
-  
-  # Loss configuration
-  triplet_margin: 0.5  # Margin for TripletLoss
-  use_multiple_negatives_ranking: true  # Enable MNR loss phase
-  use_pairwise_softmax: true  # Enable pairwise softmax loss phase (direct metric optimization)
-  temperature: 1.0  # Temperature for pairwise softmax (< 1.0 sharpens gradients)
-  
+  triplet_margin: 0.5
+  use_multiple_negatives_ranking: true
+  use_pairwise_softmax: true
+  temperature: 0.7       # Sharper softmax per APPROACH
+  # Distillation from Track A cross-encoder (Stage 3 in APPROACH)
+  distill_from_teacher: false
+  teacher_model_path: "models/track_a_cross_encoder"
+  distill_weight: 0.3
+  distill_temperature: 0.7
   # Training options
   mixed_precision: true
   gradient_clip: 1.0
@@ -40,32 +42,33 @@ track_b:
 
 # Track A - Cross-encoder settings
 track_a:
-  base_model: "roberta-large"  # Options: roberta-large, microsoft/deberta-v3-large, roberta-base
+  base_model: "BAAI/bge-large-en-v1.5"  # Share backbone with Track B
   model_save_path: "models/track_a_cross_encoder"
-  
   # Training hyperparameters
-  batch_size: 6  # Reduced for RoBERTa-large and pairwise scoring (processes 2x inputs)
+  batch_size: 4  # Pairwise scoring doubles inputs; adjust for large model
   epochs: 5
-  learning_rate: 1.0e-5  # Lower LR for large model fine-tuning
+  learning_rate: 1.0e-5
   warmup_ratio: 0.1
   weight_decay: 0.01
-  
   # Model configuration
-  max_length: 512  # RoBERTa max length (per pair). Can increase to 768-1024 for long stories
+  max_length: 512
   num_labels: 2
-  label_smoothing: 0.0  # Keep at 0.0 for binary pairwise task
-  temperature: 1.0  # Temperature scaling for loss (< 1.0 sharpens, try 0.5-0.7)
-  
+  label_smoothing: 0.0
+  temperature: 0.7      # Sharper logits for better discrimination
+  # Distillation regularizer from Track B (Stage 2 warm prior)
+  distill_from_biencoder: true
+  teacher_biencoder_path: "models/track_b_embedder"
+  distill_weight: 0.3
+  distill_temperature: 0.7
   # Training options
   mixed_precision: true
   gradient_clip: 1.0
   eval_steps: 50
   use_kfold: true
   n_folds: 5
-  
-  # Ensemble settings - RECOMMENDED: Enable for 1-3% accuracy boost
-  use_ensemble: true  # Use k-fold models as ensemble at inference
-  ensemble_method: "average"  # Options: "average" (logits), "vote" (predictions)
+  # Ensemble settings
+  use_ensemble: true
+  ensemble_method: "average"
 
 # Data augmentation
 augmentation:

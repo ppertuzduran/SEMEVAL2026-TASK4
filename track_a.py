@@ -37,7 +37,7 @@ def load_config(config_path: str = "config.yaml") -> dict:
 class CrossEncoderPredictor:
     """Cross-encoder model for narrative similarity prediction."""
     
-    def __init__(self, model_path: str, device: str = None, verbose: bool = True):
+    def __init__(self, model_path: str, device: str = None, verbose: bool = True, max_length: int = 512):
         """
         Initialize the predictor.
         
@@ -45,8 +45,10 @@ class CrossEncoderPredictor:
             model_path: Path to the fine-tuned model
             device: Device to use (cuda/cpu). Auto-detected if None.
             verbose: Print loading messages
+            max_length: Max sequence length per pair
         """
         self.device = device if device else ('cuda' if torch.cuda.is_available() else 'cpu')
+        self.max_length = max_length
         if verbose:
             print(f"Loading model from: {model_path}")
         self.tokenizer = AutoTokenizer.from_pretrained(model_path)
@@ -76,7 +78,7 @@ class CrossEncoderPredictor:
         text_a_pair = f"{anchor} {self.tokenizer.sep_token} {text_a}"
         inputs_a = self.tokenizer(
             text_a_pair,
-            max_length=512,
+            max_length=self.max_length,
             padding='max_length',
             truncation=True,
             return_tensors='pt'
@@ -87,7 +89,7 @@ class CrossEncoderPredictor:
         text_b_pair = f"{anchor} {self.tokenizer.sep_token} {text_b}"
         inputs_b = self.tokenizer(
             text_b_pair,
-            max_length=512,
+            max_length=self.max_length,
             padding='max_length',
             truncation=True,
             return_tensors='pt'
@@ -139,7 +141,7 @@ class CrossEncoderPredictor:
             # Tokenize batch A
             inputs_a = self.tokenizer(
                 texts_a,
-                max_length=512,
+                max_length=self.max_length,
                 padding='max_length',
                 truncation=True,
                 return_tensors='pt'
@@ -158,7 +160,7 @@ class CrossEncoderPredictor:
             # Tokenize batch B
             inputs_b = self.tokenizer(
                 texts_b,
-                max_length=512,
+                max_length=self.max_length,
                 padding='max_length',
                 truncation=True,
                 return_tensors='pt'
@@ -191,7 +193,7 @@ class EnsemblePredictor:
     - Typically yields 1-3% accuracy improvement
     """
     
-    def __init__(self, model_paths: List[str], device: str = None, method: str = "average"):
+    def __init__(self, model_paths: List[str], device: str = None, method: str = "average", max_length: int = 512):
         """
         Initialize ensemble with multiple models.
         
@@ -199,6 +201,7 @@ class EnsemblePredictor:
             model_paths: Paths to fold models
             device: Device to use
             method: "average" (average logits) or "vote" (majority vote)
+            max_length: Max sequence length per pair
         """
         self.device = device if device else ('cuda' if torch.cuda.is_available() else 'cpu')
         self.method = method
@@ -206,7 +209,7 @@ class EnsemblePredictor:
         
         print(f"Initializing ensemble with {len(model_paths)} models (method: {method})")
         for path in tqdm(model_paths, desc="Loading fold models", unit="model", ncols=80):
-            predictor = CrossEncoderPredictor(path, device=self.device, verbose=False)
+            predictor = CrossEncoderPredictor(path, device=self.device, verbose=False, max_length=max_length)
             self.models.append(predictor)
     
     def predict_batch(self, df: pd.DataFrame, batch_size: int = 4) -> List[bool]:
@@ -302,7 +305,7 @@ class EnsemblePredictor:
             # Tokenize and score batch A
             inputs_a = predictor.tokenizer(
                 texts_a,
-                max_length=512,
+                max_length=predictor.max_length,
                 padding='max_length',
                 truncation=True,
                 return_tensors='pt'
@@ -321,7 +324,7 @@ class EnsemblePredictor:
             # Tokenize and score batch B
             inputs_b = predictor.tokenizer(
                 texts_b,
-                max_length=512,
+                max_length=predictor.max_length,
                 padding='max_length',
                 truncation=True,
                 return_tensors='pt'
@@ -369,7 +372,8 @@ def get_predictor(config: dict):
             print(f"{'='*60}")
             return EnsemblePredictor(
                 [str(p) for p in fold_models],
-                method=ensemble_method
+                method=ensemble_method,
+                max_length=config['track_a'].get('max_length', 512)
             )
         else:
             print("Warning: use_ensemble=true but no fold models found!")
@@ -378,13 +382,13 @@ def get_predictor(config: dict):
     # Single model
     if Path(model_path).exists():
         print(f"Using single model: {model_path}")
-        return CrossEncoderPredictor(model_path)
+        return CrossEncoderPredictor(model_path, max_length=config['track_a'].get('max_length', 512))
     
     # Check for fold 0 model as fallback
     fold0_path = model_path + "_fold0"
     if Path(fold0_path).exists():
         print(f"Using fold 0 model: {fold0_path}")
-        return CrossEncoderPredictor(fold0_path)
+        return CrossEncoderPredictor(fold0_path, max_length=config['track_a'].get('max_length', 512))
     
     return None
 
