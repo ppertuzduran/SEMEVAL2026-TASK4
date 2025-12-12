@@ -23,7 +23,7 @@ track_b:
   batch_size_mnr: 8
   batch_size_pairwise: 4   # heaviest phase; keep small on T4
   batch_size_triplet: 6
-  batch_size_distill: 4
+  batch_size_distill: 2
   epochs_mnr: 3          # Phase 1: MultipleNegativesRankingLoss
   epochs_pairwise: 4     # Phase 2: PairwiseSoftmaxLoss (metric-aligned)
   epochs_triplet: 3      # Phase 3: TripletLoss with hard negatives

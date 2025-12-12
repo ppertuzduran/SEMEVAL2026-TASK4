@@ -463,7 +463,7 @@ def main():
                     anchor = batch['anchor']
                     text_a = batch['text_a']
                     text_b = batch['text_b']
-                    labels = torch.tensor(batch['label'], device=device, dtype=torch.float)
+                    labels = batch['label'].to(device, dtype=torch.float)
 
                     # Teacher logits
                     with torch.no_grad():
