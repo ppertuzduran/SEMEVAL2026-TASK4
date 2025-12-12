@@ -64,7 +64,7 @@ track_a:
   temperature: 0.7      # Sharper logits for better discrimination
   # Distillation regularizer from Track B (Stage 2 warm prior)
   distill_from_biencoder: true
-  teacher_biencoder_path: "models/track_b_embedder"
+  teacher_biencoder_path: "/content/drive/MyDrive/narrative_similarity/models/track_b_embedder"
   distill_weight: 0.3
   distill_temperature: 0.7
   # Training options
