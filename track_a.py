@@ -354,7 +354,15 @@ class EnsemblePredictor:
             scores_a_list.append(scores_a)
             scores_b_list.append(scores_b)
         
-        return torch.cat(scores_a_list), torch.cat(scores_b_list)
+        # Concatenate all batches
+        all_scores_a = torch.cat(scores_a_list)
+        all_scores_b = torch.cat(scores_b_list)
+        
+        # Apply temperature scaling (must match training config)
+        all_scores_a = all_scores_a / predictor.temperature
+        all_scores_b = all_scores_b / predictor.temperature
+        
+        return all_scores_a, all_scores_b
 
 
 def get_predictor(config: dict):
