@@ -303,51 +303,54 @@ def main():
     pair_examples = create_pair_examples(train_pairs)
     triple_softmax_examples = create_triple_softmax_examples(train_cross_encoder)
     
-    # Create DataLoaders
+    # Create DataLoaders with per-phase batch sizes to avoid OOM on large models
     batch_size = config['track_b']['batch_size']
+    batch_size_mnr = config['track_b'].get('batch_size_mnr', batch_size)
+    batch_size_pairwise = config['track_b'].get('batch_size_pairwise', batch_size)
+    batch_size_triplet = config['track_b'].get('batch_size_triplet', batch_size)
 
     triplet_loader = DataLoader(
         triplet_examples,
-        batch_size=batch_size,
+        batch_size=batch_size_triplet,
         shuffle=True
     )
 
     pair_loader = DataLoader(
         pair_examples,
-        batch_size=batch_size,
+        batch_size=batch_size_mnr,
         shuffle=True
     )
 
     triple_softmax_loader = DataLoader(
         triple_softmax_examples,
-        batch_size=batch_size,
+        batch_size=batch_size_pairwise,
         shuffle=True
     )
-
+    
     # Setup losses
     triplet_loss = losses.TripletLoss(
         model=model,
         distance_metric=losses.TripletDistanceMetric.COSINE,
         triplet_margin=config['track_b']['triplet_margin']
     )
-
+    
     mnr_loss = losses.MultipleNegativesRankingLoss(model=model)
-
+    
     pairwise_softmax_loss = PairwiseSoftmaxLoss(
         model=model,
         temperature=config['track_b'].get('temperature', 1.0)
     )
-
+    
     # Training parameters per phase
     warmup_steps = config['track_b']['warmup_steps']
-
+    
     # Setup evaluator
     evaluator = CustomEvaluator(
         dev_path=config['data']['dev_track_a'],
         device=device,
         save_path=config['track_b']['model_save_path']
     )
-
+    
     # Phase 1: MultipleNegativesRankingLoss (global structure)
     if config['track_b'].get('use_multiple_negatives_ranking', True) and len(pair_examples) > 0:
         print("\n" + "="*60)
@@ -367,27 +370,27 @@ def main():
         )
         model = SentenceTransformer(config['track_b']['model_save_path'], device=device)
         evaluator.best_accuracy = evaluator(model, "", 0, 0)
-
+    
     # Phase 2: PairwiseSoftmaxLoss (metric-aligned)
     if config['track_b'].get('use_pairwise_softmax', True) and len(triple_softmax_examples) > 0:
-        print("\n" + "="*60)
+    print("\n" + "="*60)
         print("Phase 2: PairwiseSoftmaxLoss (metric aligned)...")
-        print("="*60)
-        model.fit(
+    print("="*60)
+    model.fit(
             train_objectives=[(triple_softmax_loader, pairwise_softmax_loss)],
             epochs=config['track_b']['epochs_pairwise'],
             warmup_steps=warmup_steps,
             optimizer_params={'lr': config['track_b']['learning_rate']},
-            weight_decay=config['track_b']['weight_decay'],
-            evaluation_steps=config['track_b']['eval_steps'],
-            evaluator=evaluator,
+        weight_decay=config['track_b']['weight_decay'],
+        evaluation_steps=config['track_b']['eval_steps'],
+        evaluator=evaluator,
             output_path=config['track_b']['model_save_path'] + "_pairwise",
-            save_best_model=False,
-            use_amp=config['track_b']['mixed_precision']
-        )
+        save_best_model=False,
+        use_amp=config['track_b']['mixed_precision']
+    )
         model = SentenceTransformer(config['track_b']['model_save_path'], device=device)
         evaluator.best_accuracy = evaluator(model, "", 0, 0)
-
+        
     # Phase 3: TripletLoss (fine-grained discrimination)
     if len(triplet_examples) > 0:
         print("\n" + "="*60)
@@ -419,10 +422,11 @@ def main():
             teacher_model = AutoModelForSequenceClassification.from_pretrained(teacher_path).to(device)
             teacher_model.eval()
 
+            distill_bs = config['track_b'].get('batch_size_distill', batch_size)
             distill_dataset = DistillDataset(train_cross_encoder)
             distill_loader = DataLoader(
                 distill_dataset,
-                batch_size=batch_size,
+                batch_size=distill_bs,
                 shuffle=True
             )
 
@@ -492,7 +496,7 @@ def main():
             evaluator.best_accuracy = evaluator(model, "", 0, 0)
         else:
             print("Distillation skipped: teacher model not found.")
-
+    
     # Final evaluation
     print("\n" + "="*60)
     print("Training complete!")

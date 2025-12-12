@@ -19,7 +19,11 @@ track_b:
   base_model: "BAAI/bge-large-en-v1.5"  # High-perf backbone per APPROACH
   model_save_path: "models/track_b_embedder"
   # Training hyperparameters (split by curriculum stages)
-  batch_size: 16
+  batch_size: 8
+  batch_size_mnr: 8
+  batch_size_pairwise: 8
+  batch_size_triplet: 8
+  batch_size_distill: 8
   epochs_mnr: 3          # Phase 1: MultipleNegativesRankingLoss
   epochs_pairwise: 4     # Phase 2: PairwiseSoftmaxLoss (metric-aligned)
   epochs_triplet: 3      # Phase 3: TripletLoss with hard negatives
