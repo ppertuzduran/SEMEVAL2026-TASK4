@@ -42,6 +42,8 @@ track_b:
   # Training options
   mixed_precision: true
   gradient_clip: 1.0
+  grad_accum_steps: 2
+  enable_gradient_checkpointing: true
   eval_steps: 100
 
 # Track A - Cross-encoder settings

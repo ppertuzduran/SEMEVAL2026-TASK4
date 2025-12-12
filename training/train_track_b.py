@@ -261,6 +261,12 @@ def main():
     # Load base model (shared backbone for both tracks)
     print(f"\nLoading base model: {config['track_b']['base_model']}")
     model = SentenceTransformer(config['track_b']['base_model'], device=device)
+    if config['track_b'].get('enable_gradient_checkpointing', True):
+        try:
+            model._first_module().auto_model.gradient_checkpointing_enable()
+            print("Enabled gradient checkpointing for memory savings.")
+        except Exception as e:
+            print(f"Warning: could not enable gradient checkpointing: {e}")
     
     # Load prepared data
     prepared_dir = Path(config['data']['prepared_data_dir'])
@@ -366,28 +372,30 @@ def main():
             evaluator=evaluator,
             output_path=config['track_b']['model_save_path'] + "_mnr",
             save_best_model=False,
-            use_amp=config['track_b']['mixed_precision']
+            use_amp=config['track_b']['mixed_precision'],
+            gradient_accumulation_steps=config['track_b'].get('grad_accum_steps', 1)
         )
         model = SentenceTransformer(config['track_b']['model_save_path'], device=device)
         evaluator.best_accuracy = evaluator(model, "", 0, 0)
     
     # Phase 2: PairwiseSoftmaxLoss (metric-aligned)
     if config['track_b'].get('use_pairwise_softmax', True) and len(triple_softmax_examples) > 0:
-    print("\n" + "="*60)
+        print("\n" + "="*60)
         print("Phase 2: PairwiseSoftmaxLoss (metric aligned)...")
-    print("="*60)
-    model.fit(
+        print("="*60)
+        model.fit(
             train_objectives=[(triple_softmax_loader, pairwise_softmax_loss)],
             epochs=config['track_b']['epochs_pairwise'],
             warmup_steps=warmup_steps,
             optimizer_params={'lr': config['track_b']['learning_rate']},
-        weight_decay=config['track_b']['weight_decay'],
-        evaluation_steps=config['track_b']['eval_steps'],
-        evaluator=evaluator,
+            weight_decay=config['track_b']['weight_decay'],
+            evaluation_steps=config['track_b']['eval_steps'],
+            evaluator=evaluator,
             output_path=config['track_b']['model_save_path'] + "_pairwise",
-        save_best_model=False,
-        use_amp=config['track_b']['mixed_precision']
-    )
+            save_best_model=False,
+            use_amp=config['track_b']['mixed_precision'],
+            gradient_accumulation_steps=config['track_b'].get('grad_accum_steps', 1)
+        )
         model = SentenceTransformer(config['track_b']['model_save_path'], device=device)
         evaluator.best_accuracy = evaluator(model, "", 0, 0)
         
@@ -406,7 +414,8 @@ def main():
             evaluator=evaluator,
             output_path=config['track_b']['model_save_path'] + "_triplet",
             save_best_model=False,
-            use_amp=config['track_b']['mixed_precision']
+            use_amp=config['track_b']['mixed_precision'],
+            gradient_accumulation_steps=config['track_b'].get('grad_accum_steps', 1)
         )
         model = SentenceTransformer(config['track_b']['model_save_path'], device=device)
         evaluator.best_accuracy = evaluator(model, "", 0, 0)
