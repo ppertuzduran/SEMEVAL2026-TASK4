@@ -37,7 +37,7 @@ def load_config(config_path: str = "config.yaml") -> dict:
 class CrossEncoderPredictor:
     """Cross-encoder model for narrative similarity prediction."""
     
-    def __init__(self, model_path: str, device: str = None, verbose: bool = True, max_length: int = 512):
+    def __init__(self, model_path: str, device: str = None, verbose: bool = True, max_length: int = 512, temperature: float = 1.0):
         """
         Initialize the predictor.
         
@@ -46,9 +46,11 @@ class CrossEncoderPredictor:
             device: Device to use (cuda/cpu). Auto-detected if None.
             verbose: Print loading messages
             max_length: Max sequence length per pair
+            temperature: Temperature for scaling logits (must match training config)
         """
         self.device = device if device else ('cuda' if torch.cuda.is_available() else 'cpu')
         self.max_length = max_length
+        self.temperature = temperature
         if verbose:
             print(f"Loading model from: {model_path}")
         self.tokenizer = AutoTokenizer.from_pretrained(model_path)
@@ -102,6 +104,10 @@ class CrossEncoderPredictor:
         
         outputs_b = self.model(**inputs_b)
         score_b = outputs_b.logits[0, 1].item()
+        
+        # Apply temperature scaling (must match training config)
+        score_a = score_a / self.temperature
+        score_b = score_b / self.temperature
         
         # Predict: A is closer if score_a > score_b
         return score_a > score_b
@@ -171,6 +177,10 @@ class CrossEncoderPredictor:
             outputs_b = self.model(**inputs_b)
             scores_b = outputs_b.logits[:, 1].detach().cpu().numpy()  # Positive class logit
             
+            # Apply temperature scaling (must match training config)
+            scores_a = scores_a / self.temperature
+            scores_b = scores_b / self.temperature
+            
             # Predict: A is closer if score_a > score_b
             batch_predictions = scores_a > scores_b
             predictions.extend([bool(p) for p in batch_predictions])
@@ -193,7 +203,7 @@ class EnsemblePredictor:
     - Typically yields 1-3% accuracy improvement
     """
     
-    def __init__(self, model_paths: List[str], device: str = None, method: str = "average", max_length: int = 512):
+    def __init__(self, model_paths: List[str], device: str = None, method: str = "average", max_length: int = 512, temperature: float = 1.0):
         """
         Initialize ensemble with multiple models.
         
@@ -202,6 +212,7 @@ class EnsemblePredictor:
             device: Device to use
             method: "average" (average logits) or "vote" (majority vote)
             max_length: Max sequence length per pair
+            temperature: Temperature for scaling logits (must match training config)
         """
         self.device = device if device else ('cuda' if torch.cuda.is_available() else 'cpu')
         self.method = method
@@ -209,7 +220,7 @@ class EnsemblePredictor:
         
         print(f"Initializing ensemble with {len(model_paths)} models (method: {method})")
         for path in tqdm(model_paths, desc="Loading fold models", unit="model"):
-            predictor = CrossEncoderPredictor(path, device=self.device, verbose=False, max_length=max_length)
+            predictor = CrossEncoderPredictor(path, device=self.device, verbose=False, max_length=max_length, temperature=temperature)
             self.models.append(predictor)
     
     def predict_batch(self, df: pd.DataFrame, batch_size: int = 4) -> List[bool]:
@@ -358,6 +369,8 @@ def get_predictor(config: dict):
         Predictor instance or None if no model found
     """
     model_path = config['track_a']['model_save_path']
+    max_length = config['track_a'].get('max_length', 512)
+    temperature = config['track_a'].get('temperature', 1.0)  # Get temperature from config
     
     # Check if we should use ensemble (RECOMMENDED in APPROACH.md)
     if config['track_a'].get('use_ensemble', False):
@@ -373,7 +386,8 @@ def get_predictor(config: dict):
             return EnsemblePredictor(
                 [str(p) for p in fold_models],
                 method=ensemble_method,
-                max_length=config['track_a'].get('max_length', 512)
+                max_length=max_length,
+                temperature=temperature
             )
         else:
             print("Warning: use_ensemble=true but no fold models found!")
@@ -382,13 +396,13 @@ def get_predictor(config: dict):
     # Single model
     if Path(model_path).exists():
         print(f"Using single model: {model_path}")
-        return CrossEncoderPredictor(model_path, max_length=config['track_a'].get('max_length', 512))
+        return CrossEncoderPredictor(model_path, max_length=max_length, temperature=temperature)
     
     # Check for fold 0 model as fallback
     fold0_path = model_path + "_fold0"
     if Path(fold0_path).exists():
         print(f"Using fold 0 model: {fold0_path}")
-        return CrossEncoderPredictor(fold0_path, max_length=config['track_a'].get('max_length', 512))
+        return CrossEncoderPredictor(fold0_path, max_length=max_length, temperature=temperature)
     
     return None
 
