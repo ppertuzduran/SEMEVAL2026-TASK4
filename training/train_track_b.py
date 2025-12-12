@@ -431,6 +431,11 @@ def main():
     # Optional Phase 4: Distillation from Track A cross-encoder (teacher → student)
     if config['track_b'].get('distill_from_teacher', False):
         teacher_path = config['track_b'].get('teacher_model_path')
+        print(f"Checking teacher model at: {teacher_path}")
+        if Path(teacher_path).exists():
+            print(f"✓ Teacher model found at {teacher_path}")
+        else:
+            print(f"✗ Teacher model NOT found at {teacher_path}")
         if teacher_path and Path(teacher_path).exists():
             print("\n" + "="*60)
             print("Phase 4: Distillation from Track A cross-encoder...")
@@ -458,7 +463,7 @@ def main():
                     anchor = batch['anchor']
                     text_a = batch['text_a']
                     text_b = batch['text_b']
-                    labels = torch.tensor(batch['label'], device=device).float()
+                    labels = torch.tensor(batch['label'], device=device, dtype=torch.float)
 
                     # Teacher logits
                     with torch.no_grad():
@@ -487,6 +492,10 @@ def main():
                     features_anchor = model.tokenize(list(anchor))
                     features_a = model.tokenize(list(text_a))
                     features_b = model.tokenize(list(text_b))
+                    # Move tokenized features to device
+                    features_anchor = {k: v.to(device) for k, v in features_anchor.items()}
+                    features_a = {k: v.to(device) for k, v in features_a.items()}
+                    features_b = {k: v.to(device) for k, v in features_b.items()}
                     anchor_emb = model(features_anchor)['sentence_embedding']
                     a_emb = model(features_a)['sentence_embedding']
                     b_emb = model(features_b)['sentence_embedding']
