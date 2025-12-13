@@ -31,6 +31,12 @@ try:
 except LookupError:
     nltk.download('averaged_perceptron_tagger', quiet=True)
 
+# Newer NLTK versions use language-specific taggers
+try:
+    nltk.data.find('taggers/averaged_perceptron_tagger_eng')
+except LookupError:
+    nltk.download('averaged_perceptron_tagger_eng', quiet=True)
+
 try:
     nltk.data.find('tokenizers/punkt_tab')
 except LookupError:
