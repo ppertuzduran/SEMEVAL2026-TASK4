@@ -7,12 +7,15 @@ This script:
 3. Saves augmented dataset to data/prepared/augmented/
 4. Generates quality report
 
-Usage:
+Usage (Colab):
     python scripts/augment_training_data.py
+
+Note: This script is Colab-aware and will automatically use Google Drive paths.
 """
 
 import json
 import sys
+import os
 import random
 from pathlib import Path
 from collections import defaultdict
@@ -24,6 +27,15 @@ from tqdm import tqdm
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from utils.data_augmentation import create_default_pipeline
+
+# Import Colab utilities
+try:
+    from training.colab_utils import is_colab, setup_colab_environment, update_config_for_colab
+    COLAB_AVAILABLE = True
+except ImportError:
+    COLAB_AVAILABLE = False
+    def is_colab():
+        return False
 
 
 def load_config(config_path: str = "config.yaml") -> dict:
@@ -348,8 +360,18 @@ def main():
     print("DATA AUGMENTATION FOR TRACK B")
     print("="*60)
     
-    # Load config
-    config = load_config()
+    # Setup Colab environment if running in Colab
+    if is_colab():
+        print("\n🔧 Running in Google Colab - setting up environment...")
+        colab_paths = setup_colab_environment()
+        
+        # Load and update config for Colab
+        config = load_config(colab_paths['config_path'])
+        config = update_config_for_colab(config, colab_paths)
+    else:
+        # Local execution
+        print("\n💻 Running locally")
+        config = load_config()
     
     # Setup paths
     prepared_dir = Path(config['data']['prepared_data_dir'])
