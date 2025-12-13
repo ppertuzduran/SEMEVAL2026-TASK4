@@ -167,9 +167,9 @@ cp -r output/* /content/drive/MyDrive/narrative_similarity/output/
 ## Track B Improvements Explained
 
 ### **Improvement 1: Better Regularization** (+0.3-0.5%)
-- Adds dropout to projection head
-- Higher weight decay for projection layer
-- Prevents overfitting on small dataset
+- Higher weight decay for projection layer (0.08 vs 0.01)
+- Adds constraints to prevent overfitting on small dataset
+- Note: Projection dropout is currently handled via weight decay for improved stability
 
 ### **Improvement 2: Hyperparameter Sweep** (+0.5-1%)
 - Tests temperature × margin combinations

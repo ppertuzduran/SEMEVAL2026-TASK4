@@ -109,7 +109,6 @@ def main():
     print(f"\n✓ Backed up config to: {backup_path}")
     
     experiments = []
-    target_accuracy = 0.95
     
     # Experiment 1: Baseline (current settings)
     print(f"\n{'='*70}")
@@ -129,113 +128,109 @@ def main():
     print(f"\n📊 Baseline accuracy: {baseline_accuracy:.4f}")
     
     # Experiment 2: + Better Regularization
-    if baseline_accuracy < target_accuracy:
-        config_reg = load_config(backup_path)
-        config_reg['track_b']['projection_dropout'] = 0.15
-        config_reg['track_b']['projection_weight_decay'] = 0.08
-        
-        print(f"\n{'='*70}")
-        print("IMPROVEMENT 1: Better Regularization")
-        print(f"{'='*70}")
-        print("\nChanges:")
-        print(f"  projection_dropout: 0.0 → 0.15")
-        print(f"  projection_weight_decay: 0.01 → 0.08")
-        
-        reg_result = run_experiment("+ Regularization", config_reg, config_path)
-        experiments.append(reg_result)
-        
-        reg_accuracy = reg_result.get('accuracy', 0.0)
-        delta = reg_accuracy - baseline_accuracy
-        print(f"\n📊 Accuracy: {reg_accuracy:.4f} (Δ={delta:+.4f})")
-        
-        # Keep if improvement
-        if reg_accuracy >= baseline_accuracy:
-            print("✓ Keeping regularization improvements")
-            base_config = config_reg
-            baseline_accuracy = reg_accuracy
-        else:
-            print("✗ Reverting regularization (no improvement)")
+    config_reg = load_config(backup_path)
+    config_reg['track_b']['projection_dropout'] = 0.15
+    config_reg['track_b']['projection_weight_decay'] = 0.08
+    
+    print(f"\n{'='*70}")
+    print("IMPROVEMENT 1: Better Regularization")
+    print(f"{'='*70}")
+    print("\nChanges:")
+    print(f"  projection_dropout: 0.0 → 0.15")
+    print(f"  projection_weight_decay: 0.01 → 0.08")
+    
+    reg_result = run_experiment("+ Regularization", config_reg, config_path)
+    experiments.append(reg_result)
+    
+    reg_accuracy = reg_result.get('accuracy', 0.0)
+    delta = reg_accuracy - baseline_accuracy
+    print(f"\n📊 Accuracy: {reg_accuracy:.4f} (Δ={delta:+.4f})")
+    
+    # Keep if improvement
+    if reg_accuracy >= baseline_accuracy:
+        print("✓ Keeping regularization improvements")
+        base_config = config_reg
+        baseline_accuracy = reg_accuracy
+    else:
+        print("✗ Reverting regularization (no improvement)")
     
     # Experiment 3: + Hyperparameter Sweep
-    if baseline_accuracy < target_accuracy:
-        config_sweep = base_config.copy()
-        config_sweep['track_b']['enable_hyperparam_sweep'] = True
-        
-        print(f"\n{'='*70}")
-        print("IMPROVEMENT 2: Hyperparameter Sweep")
-        print(f"{'='*70}")
-        print("\nChanges:")
-        print(f"  enable_hyperparam_sweep: False → True")
-        print(f"  Testing: {len(config_sweep['track_b']['temperature_grid'])} temps × {len(config_sweep['track_b']['margin_grid'])} margins")
-        
-        sweep_result = run_experiment("+ Hyperparam Sweep", config_sweep, config_path)
-        experiments.append(sweep_result)
-        
-        sweep_accuracy = sweep_result.get('accuracy', 0.0)
-        delta = sweep_accuracy - baseline_accuracy
-        print(f"\n📊 Accuracy: {sweep_accuracy:.4f} (Δ={delta:+.4f})")
-        
-        if sweep_accuracy >= baseline_accuracy:
-            print("✓ Keeping hyperparameter sweep")
-            base_config = config_sweep
-            baseline_accuracy = sweep_accuracy
-        else:
-            print("✗ Reverting sweep (no improvement)")
+    config_sweep = base_config.copy()
+    config_sweep['track_b']['enable_hyperparam_sweep'] = True
+    
+    print(f"\n{'='*70}")
+    print("IMPROVEMENT 2: Hyperparameter Sweep")
+    print(f"{'='*70}")
+    print("\nChanges:")
+    print(f"  enable_hyperparam_sweep: False → True")
+    print(f"  Testing: {len(config_sweep['track_b']['temperature_grid'])} temps × {len(config_sweep['track_b']['margin_grid'])} margins")
+    
+    sweep_result = run_experiment("+ Hyperparam Sweep", config_sweep, config_path)
+    experiments.append(sweep_result)
+    
+    sweep_accuracy = sweep_result.get('accuracy', 0.0)
+    delta = sweep_accuracy - baseline_accuracy
+    print(f"\n📊 Accuracy: {sweep_accuracy:.4f} (Δ={delta:+.4f})")
+    
+    if sweep_accuracy >= baseline_accuracy:
+        print("✓ Keeping hyperparameter sweep")
+        base_config = config_sweep
+        baseline_accuracy = sweep_accuracy
+    else:
+        print("✗ Reverting sweep (no improvement)")
     
     # Experiment 4: + Hard Negative Mining
-    if baseline_accuracy < target_accuracy:
-        config_hard = base_config.copy()
-        config_hard['track_b']['enable_hard_negatives'] = True
-        config_hard['track_b']['hard_negative_k'] = 5
-        config_hard['track_b']['hard_negative_epochs'] = 2
-        
-        print(f"\n{'='*70}")
-        print("IMPROVEMENT 3: Hard Negative Mining")
-        print(f"{'='*70}")
-        print("\nChanges:")
-        print(f"  enable_hard_negatives: False → True")
-        print(f"  hard_negative_k: 5")
-        print(f"  hard_negative_epochs: 2")
-        
-        hard_result = run_experiment("+ Hard Negatives", config_hard, config_path)
-        experiments.append(hard_result)
-        
-        hard_accuracy = hard_result.get('accuracy', 0.0)
-        delta = hard_accuracy - baseline_accuracy
-        print(f"\n📊 Accuracy: {hard_accuracy:.4f} (Δ={delta:+.4f})")
-        
-        if hard_accuracy >= baseline_accuracy:
-            print("✓ Keeping hard negative mining")
-            base_config = config_hard
-            baseline_accuracy = hard_accuracy
-        else:
-            print("✗ Reverting hard negatives (no improvement)")
+    config_hard = base_config.copy()
+    config_hard['track_b']['enable_hard_negatives'] = True
+    config_hard['track_b']['hard_negative_k'] = 5
+    config_hard['track_b']['hard_negative_epochs'] = 2
     
-    # Experiment 5: + SimCSE (if still below target)
-    if baseline_accuracy < target_accuracy:
-        config_simcse = base_config.copy()
-        config_simcse['track_b']['enable_simcse'] = True
-        
-        print(f"\n{'='*70}")
-        print("IMPROVEMENT 4: SimCSE Consistency Loss")
-        print(f"{'='*70}")
-        print("\nChanges:")
-        print(f"  enable_simcse: False → True")
-        print(f"  loss_weights.simcse: 0.1")
-        
-        simcse_result = run_experiment("+ SimCSE", config_simcse, config_path)
-        experiments.append(simcse_result)
-        
-        simcse_accuracy = simcse_result.get('accuracy', 0.0)
-        delta = simcse_accuracy - baseline_accuracy
-        print(f"\n📊 Accuracy: {simcse_accuracy:.4f} (Δ={delta:+.4f})")
-        
-        if simcse_accuracy >= baseline_accuracy:
-            print("✓ Keeping SimCSE")
-            base_config = config_simcse
-            baseline_accuracy = simcse_accuracy
-        else:
-            print("✗ Reverting SimCSE (no improvement)")
+    print(f"\n{'='*70}")
+    print("IMPROVEMENT 3: Hard Negative Mining")
+    print(f"{'='*70}")
+    print("\nChanges:")
+    print(f"  enable_hard_negatives: False → True")
+    print(f"  hard_negative_k: 5")
+    print(f"  hard_negative_epochs: 2")
+    
+    hard_result = run_experiment("+ Hard Negatives", config_hard, config_path)
+    experiments.append(hard_result)
+    
+    hard_accuracy = hard_result.get('accuracy', 0.0)
+    delta = hard_accuracy - baseline_accuracy
+    print(f"\n📊 Accuracy: {hard_accuracy:.4f} (Δ={delta:+.4f})")
+    
+    if hard_accuracy >= baseline_accuracy:
+        print("✓ Keeping hard negative mining")
+        base_config = config_hard
+        baseline_accuracy = hard_accuracy
+    else:
+        print("✗ Reverting hard negatives (no improvement)")
+    
+    # Experiment 5: + SimCSE
+    config_simcse = base_config.copy()
+    config_simcse['track_b']['enable_simcse'] = True
+    
+    print(f"\n{'='*70}")
+    print("IMPROVEMENT 4: SimCSE Consistency Loss")
+    print(f"{'='*70}")
+    print("\nChanges:")
+    print(f"  enable_simcse: False → True")
+    print(f"  loss_weights.simcse: 0.1")
+    
+    simcse_result = run_experiment("+ SimCSE", config_simcse, config_path)
+    experiments.append(simcse_result)
+    
+    simcse_accuracy = simcse_result.get('accuracy', 0.0)
+    delta = simcse_accuracy - baseline_accuracy
+    print(f"\n📊 Accuracy: {simcse_accuracy:.4f} (Δ={delta:+.4f})")
+    
+    if simcse_accuracy >= baseline_accuracy:
+        print("✓ Keeping SimCSE")
+        base_config = config_simcse
+        baseline_accuracy = simcse_accuracy
+    else:
+        print("✗ Reverting SimCSE (no improvement)")
     
     # Save final best config
     save_config(base_config, config_path)
@@ -245,9 +240,7 @@ def main():
         json.dump({
             'experiments': experiments,
             'best_config': base_config['track_b'],
-            'final_accuracy': baseline_accuracy,
-            'target_accuracy': target_accuracy,
-            'target_reached': baseline_accuracy >= target_accuracy
+            'final_accuracy': baseline_accuracy
         }, f, indent=2)
     
     # Print summary
@@ -269,10 +262,6 @@ def main():
     
     print(f"\n{'='*70}")
     print(f"FINAL BEST ACCURACY: {baseline_accuracy:.4f}")
-    if baseline_accuracy >= target_accuracy:
-        print(f"🎉 TARGET REACHED! ({target_accuracy:.4f})")
-    else:
-        print(f"⚠️  Target not reached. Gap: {target_accuracy - baseline_accuracy:.4f}")
     print(f"{'='*70}")
     
     print(f"\n✓ Results saved to: {results_path}")

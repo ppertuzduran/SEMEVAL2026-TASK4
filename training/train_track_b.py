@@ -624,7 +624,8 @@ def main():
         evaluator=evaluator,
         output_path=config['track_b']['model_save_path'] + "_temp",
         save_best_model=False,
-        use_amp=config['track_b']['mixed_precision']
+        use_amp=config['track_b']['mixed_precision'],
+        report_to="none"
     )
     
     # Load best model from phase 1
@@ -675,7 +676,8 @@ def main():
             evaluator=evaluator,
             output_path=config['track_b']['model_save_path'] + "_hard",
             save_best_model=False,
-            use_amp=config['track_b']['mixed_precision']
+            use_amp=config['track_b']['mixed_precision'],
+            report_to="none"
         )
         
         model = SentenceTransformer(config['track_b']['model_save_path'], device=device)
