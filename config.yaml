@@ -92,6 +92,25 @@ track_a:
 
 # Data augmentation
 augmentation:
-  enable: true
-  swap_ab: true
+  # Use augmented data for training
+  use_augmented_data: true  # Set to true after running augment_training_data.py
+  
+  # Augmentation strategies (for generation via augment_training_data.py)
+  strategies:
+    paraphrasing:
+      enable: true
+      model: "Vamsi/T5_Paraphrase_Paws"  # Offline T5 paraphraser
+      num_beams: 5
+      temperature: 1.2
+    
+    synonym_replacement:
+      enable: true
+      replacement_prob: 0.15
+      max_replacements: 3
+  
+  # Augmentation parameters
+  n_augmentations: 2  # Generate 2 augmented versions per example (3x total data)
+  min_similarity: 0.3  # Filter out augmentations too different from original
+  max_similarity: 0.9  # Filter out augmentations too similar to original
+
 

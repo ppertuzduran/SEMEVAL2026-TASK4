@@ -540,17 +540,43 @@ def main():
     except Exception:
         pass
     
-    # Load prepared data
+    # Load prepared data (with augmentation support)
     prepared_dir = Path(config['data']['prepared_data_dir'])
-    print("\nLoading data...")
-    triplets = load_triplets(prepared_dir / "triplets.jsonl")
-    pairs = load_pairs(prepared_dir / "pairs.jsonl")
     
-    with open(prepared_dir / "cross_encoder_data.jsonl", 'r', encoding='utf-8') as f:
+    # Check if we should use augmented data
+    use_augmented = config.get('augmentation', {}).get('use_augmented_data', False)
+    augmented_dir = prepared_dir / "augmented"
+    
+    if use_augmented and augmented_dir.exists():
+        data_dir = augmented_dir
+        print(f"\n✓ Using AUGMENTED data from: {data_dir}")
+    else:
+        data_dir = prepared_dir
+        if use_augmented:
+            print(f"\n⚠️  Augmented data not found, using original data from: {data_dir}")
+        else:
+            print(f"\nLoading data from: {data_dir}")
+    
+    print("Loading data...")
+    triplets = load_triplets(data_dir / "triplets.jsonl")
+    pairs = load_pairs(data_dir / "pairs.jsonl")
+    
+    with open(data_dir / "cross_encoder_data.jsonl", 'r', encoding='utf-8') as f:
         cross_encoder_data = [json.loads(line) for line in f]
     
+    # Count augmented vs original
+    if use_augmented and data_dir == augmented_dir:
+        n_aug_triplets = sum(1 for t in triplets if t.get('augmented', False))
+        n_aug_pairs = sum(1 for p in pairs if p.get('augmented', False))
+        n_aug_cross = sum(1 for d in cross_encoder_data if d.get('augmented', False))
+        
+        print(f"\nAugmentation statistics:")
+        print(f"  Triplets: {len(triplets)} total ({n_aug_triplets} augmented, {len(triplets)-n_aug_triplets} original)")
+        print(f"  Pairs: {len(pairs)} total ({n_aug_pairs} augmented, {len(pairs)-n_aug_pairs} original)")
+        print(f"  Cross-encoder: {len(cross_encoder_data)} total ({n_aug_cross} augmented, {len(cross_encoder_data)-n_aug_cross} original)")
+    
     # Load train/val split
-    with open(prepared_dir / "train_val_split.json", 'r') as f:
+    with open(data_dir / "train_val_split.json", 'r') as f:
         split = json.load(f)
     
     train_indices = set(split['train'])
@@ -560,7 +586,7 @@ def main():
     train_pairs = [p for i, p in enumerate(pairs) if i // 2 in train_indices]
     train_cross_encoder = [d for i, d in enumerate(cross_encoder_data) if i // 2 in train_indices]
     
-    print(f"Train triplets: {len(train_triplets)}")
+    print(f"\nTrain triplets: {len(train_triplets)}")
     print(f"Train pairs: {len(train_pairs)}")
     print(f"Train cross-encoder: {len(train_cross_encoder)}")
     
