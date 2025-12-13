@@ -469,17 +469,24 @@ def add_projection_head(model: SentenceTransformer, projection_dim: int, dropout
     modules.append(dense)
     
     if dropout > 0:
-        # Add dropout layer (custom wrapper)
-        class DropoutLayer(nn.Module):
-            def __init__(self, dropout_rate):
-                super().__init__()
-                self.dropout = nn.Dropout(dropout_rate)
-            
-            def forward(self, features):
-                features['sentence_embedding'] = self.dropout(features['sentence_embedding'])
-                return features
+        # Use SentenceTransformer's built-in Dense layer with identity activation + dropout
+        # This is more compatible than a custom layer
+        dropout_dense = models.Dense(
+            in_features=projection_dim,
+            out_features=projection_dim,
+            activation_function=nn.Identity(),
+            bias=False  # No bias needed for identity
+        )
+        # Manually add dropout to the dense layer
+        dropout_dense.linear = nn.Sequential(
+            nn.Dropout(dropout),
+            nn.Linear(projection_dim, projection_dim, bias=False)
+        )
+        # Initialize as identity
+        with torch.no_grad():
+            dropout_dense.linear[1].weight.copy_(torch.eye(projection_dim))
         
-        modules.append(DropoutLayer(dropout))
+        modules.append(dropout_dense)
     
     modules.append(normalize_layer)
     
