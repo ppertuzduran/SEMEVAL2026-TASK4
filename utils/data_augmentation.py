@@ -31,6 +31,11 @@ try:
 except LookupError:
     nltk.download('averaged_perceptron_tagger', quiet=True)
 
+try:
+    nltk.data.find('tokenizers/punkt_tab')
+except LookupError:
+    nltk.download('punkt_tab', quiet=True)
+
 
 class ParaphraseAugmenter:
     """
