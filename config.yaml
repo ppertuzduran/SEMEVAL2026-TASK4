@@ -59,7 +59,7 @@ track_a:
   architecture: "mlp_head"  # v2: MLP head instead of cross-encoder
   model_save_path: "models/track_a_mlp_head"
   # Track B dependency (must be trained first)
-  track_b_model_path: "/content/drive/MyDrive/narrative_similarity/models/track_b_embedder"
+  track_b_model_path: "models/track_b_embedder"  # Relative path (works on Windows and Colab)
   freeze_track_b: true      # Head-only training (recommended first)
   # MLP Head architecture
   mlp_hidden_dim: 1024      # 2d where d=512 (projection_dim)
