@@ -38,7 +38,7 @@ track_b:
   temperature: 0.7         # Sharper softmax per APPROACH
   max_seq_length: 384      # shorten sequences to save VRAM on T4
   # Hard Negative Mining (IMPROVEMENT 1)
-  enable_hard_negatives: false  # Set to true to mine hard negatives
+  enable_hard_negatives: true  # Set to true to mine hard negatives
   hard_negative_k: 5            # Number of hard negatives per anchor
   hard_negative_epochs: 2       # Extra epochs on hard negatives
   # Hyperparameter Sweep (IMPROVEMENT 2)
@@ -46,7 +46,7 @@ track_b:
   temperature_grid: [0.5, 0.7, 1.0]  # Temperature values to test
   margin_grid: [0.1, 0.2, 0.3]       # Margin values to test
   # SimCSE Consistency Loss (IMPROVEMENT 3)
-  enable_simcse: false     # Set to true for SimCSE loss
+  enable_simcse: true     # Set to true for SimCSE loss
   # Training options
   mixed_precision: true
   gradient_clip: 1.0
