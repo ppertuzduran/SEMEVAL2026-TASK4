@@ -1,363 +1,356 @@
-# Distillation-Centric Approach for Narrative Similarity (Tracks A & B)
+# Next-Gen Approach for Narrative Similarity (Tracks A & B)
 
-This document describes the unified, **distillation-centric** strategy implemented for the SemEval 2026 Task 4 competition, where:
-- **Track B** trains a strong bi-encoder first using a multi-phase curriculum.
-- **Track A** builds a cross-encoder initialized from Track B's backbone.
-- Both tracks are coupled via **bidirectional knowledge distillation** for improved accuracy and consistency.
+This document describes a **v2 approach** to improve both Track A and Track B beyond the current
+~0.89 (Track A) and ~0.94 (Track B) accuracy levels. The goal is to:
 
----
-
-## 1. Task Overview
-
-### Track A (Cross-Encoder Classification)
-- **Input**: `(anchor_story, choice_A, choice_B)`
-- **Output**: Which of A or B is more narratively similar to the anchor
-- **Metric**: Accuracy on triple-wise comparisons
-- **Architecture**: Cross-encoder with pairwise scoring
-
-### Track B (Bi-Encoder Embeddings)
-- **Input**: Single stories (independent encoding)
-- **Output**: Embeddings where cosine similarity aligns with narrative similarity
-- **Metric**: Triple-wise accuracy from cosine comparisons
-- **Constraint**: Embeddings must be computed **independently per story** at inference
-- **Embedding dimension**: 1024 (within 10-8192 limit)
+- Push **Track B** closer to the theoretical ceiling by making the bi-encoder the primary model,
+  trained with stronger supervision and regularization.
+- Make **Track A** a *lightweight interaction head* on top of Track B, instead of a full
+  cross-encoder that is currently more prone to overfitting.
+- Keep the implementation compatible with the existing `train_track_a.py`, `train_track_b.py`,
+  `track_a.py`, and `track_b.py` structure, so changes are incremental rather than a full rewrite.
 
 ---
 
-## 2. High-Level Strategy
+## 1. Current System: Short Diagnostic
 
-1. **Train Track B bi-encoder** using a 3-phase curriculum (MNR → Pairwise → Triplet)
-2. **Initialize Track A cross-encoder** from Track B's backbone
-3. **Bidirectional distillation**:
-   - Track B → Track A: Warm regularization during Track A training
-   - Track A → Track B: Refine embeddings using ensemble teacher
-4. **K-fold ensembling** for Track A (5 models with logit averaging)
+### 1.1 What we have now
 
----
+From the existing implementation and logs:
 
-## 3. Model Architecture
+- **Track B**
+  - Backbone: `BAAI/bge-large-en-v1.5` SentenceTransformer.
+  - Multi-phase training:
+    - Phase 1: MultipleNegativesRankingLoss on (anchor, positive) pairs.
+    - Phase 2: custom PairwiseSoftmaxLoss on (anchor, A, B) triples.
+    - Phase 3: TripletLoss on (anchor, positive, negative).
+  - Optional Phase 4: Distillation from the Track A cross-encoder ensemble.
+  - Model selection is driven by accuracy on the Track A dev triples (cosine-based).
 
-### 3.1. Track B Bi-Encoder
+- **Track A**
+  - Backbone: `BAAI/bge-large-en-v1.5` loaded as `AutoModelForSequenceClassification`.
+  - Pairwise scoring cross-encoder:
+    - Score (anchor, A) and (anchor, B) separately using the positive class logit.
+    - Apply temperature scaling and softmax over `[score_a, score_b]`.
+  - Uses 5-fold cross-validation + ensemble (average logits).
+  - Regularized with **B→A distillation** from the Track B bi-encoder.
+  - Achieves ~0.93 cross-val accuracy but ~0.89 actual inference accuracy on dev.
 
-**Base Model**: `BAAI/bge-large-en-v1.5`
-- 1024-dimensional embeddings (L2-normalized)
-- Max sequence length: 384 tokens (reduced for T4 GPU VRAM)
-- CLS pooling with L2 normalization
+### 1.2 Observed gap
 
-**Training Phases**:
-1. **Phase 1 - MultipleNegativesRankingLoss** (3 epochs)
-   - Global contrastive learning
-   - Batch size: 8
-   - Builds general semantic structure
+- **Track B (bi-encoder) already outperforms Track A** on the evaluation metric
+  even though Track A is a more expressive model.
+- This is a strong signal that:
+  - The **bi-encoder is well-aligned** to the triple-wise metric.
+  - The **cross-encoder is slightly overfitting**, despite k-fold and distillation,
+    and is not delivering extra value over the bi-encoder in terms of generalization.
 
-2. **Phase 2 - PairwiseSoftmaxLoss** (4 epochs)
-   - Direct metric optimization
-   - Temperature: 0.7 (sharpens gradients)
-   - Batch size: 4
-   - Aligns with triple-wise evaluation
-
-3. **Phase 3 - TripletLoss** (3 epochs)
-   - Fine-grained discrimination
-   - Margin: 0.5
-   - Batch size: 6
-   - Hard negative mining
-
-### 3.2. Track A Cross-Encoder
-
-**Architecture**: Pairwise scoring (NOT traditional cross-encoder head)
-- **Backbone**: Initialized from Track B bi-encoder
-- **Base model**: `BAAI/bge-large-en-v1.5` (shared with Track B)
-- **Max sequence length**: 512 tokens
-- **Scoring method**:
-  1. Encode `(anchor, text_a)` → get logit for positive class
-  2. Encode `(anchor, text_b)` → get logit for positive class
-  3. Stack logits: `[score_a, score_b]`
-  4. Apply temperature scaling: `logits / 0.7`
-  5. Softmax + CrossEntropyLoss
-
-**Key Features**:
-- **Temperature scaling**: 0.7 (matches Track B)
-- **Swap augmentation**: Doubles dataset by swapping A/B positions
-- **K-fold training**: 5 folds for ensemble
-- **Gradient checkpointing**: Enabled for VRAM efficiency
-- **Mixed precision**: FP16 training
+This motivates a v2 design where **Track B is the primary model**, and **Track A becomes a thin
+reranking / interaction head on top of Track B embeddings**, rather than a fully independent model.
 
 ---
 
-## 4. Training Pipeline
+## 2. High-Level v2 Strategy
 
-### Stage 1: Track B Core Training
+1. **Elevate Track B to the main narrative similarity model**:
+   - Keep the current 3-phase training, but strengthen metric alignment and regularization.
+   - Introduce harder negatives and better supervision on the triple-level decision.
 
-**Data Preparation**:
-- Load `dev_track_a.jsonl` (200 samples)
-- Create triplets: `(anchor, positive, negative)`
-- Create pairs: `(anchor, candidate, label)`
-- 80/20 train/val split
+2. **Redesign Track A as a lightweight “interaction head” over Track B embeddings**:
+   - Replace the heavy cross-encoder with a small MLP that operates on frozen (or lightly
+     fine-tuned) Track B embeddings.
+   - Directly optimize a ranking-style loss on (anchor, A, B) using the embedding features.
 
-**Loss Curriculum**:
-```
-Phase 1 (3 epochs): MultipleNegativesRankingLoss
-  ↓
-Phase 2 (4 epochs): PairwiseSoftmaxLoss (τ=0.7)
-  ↓
-Phase 3 (3 epochs): TripletLoss (margin=0.5)
-```
+3. **Late fusion between B and A at inference**:
+   - Use Track B cosine similarities *and* the Track A head scores as features in a simple
+     calibration layer (e.g., logistic regression) learned on the dev triples.
 
-**Optimization**:
-- Optimizer: AdamW (lr=1e-5, weight_decay=0.01)
-- Warmup: 500 steps
-- Gradient clipping: 1.0
-- Gradient accumulation: 2 steps
-- Early stopping on validation accuracy
+This setup is more data-efficient (tiny labeled dataset) and enforces **full consistency between
+Track A and Track B**, since both are built over the same embedding space.
 
-**Result**: Strong bi-encoder saved to `models/track_b_embedder`
+---
 
-### Stage 2: Track A Cross-Encoder Training
+## 3. Improved Track B: Stronger, More Regularized Bi-Encoder
 
-**Initialization**:
-1. Load Track B bi-encoder weights
-2. Create `AutoModelForSequenceClassification` with 2 labels
-3. Initialize backbone from Track B encoder
-4. Add classification head (randomly initialized)
+### 3.1 Backbone and embedding dimension
 
-**Data Preparation**:
-- Load `cross_encoder_data.jsonl` (400 samples with swap augmentation)
-- Create 5-fold cross-validation splits
-- Each fold: 320 train, 40 validation
+- Keep using `BAAI/bge-large-en-v1.5` as backbone (already strong and compatible).
+- Consider **reducing the embedding dimension** via an additional linear projection head
+  to **512 dimensions**:
+  - Add a linear layer on top of the BGE embedding: `W ∈ R^{512×1024}` + LayerNorm.
+  - This reduces capacity and can **improve generalization** on small datasets.
+  - Track rules allow any dimension between 10 and 8192, so 512 is legal.
 
-**Training Objective**:
-```python
-# For each triple (anchor, A, B, label):
-score_a = model(anchor + [SEP] + text_a).logits[:, 1]
-score_b = model(anchor + [SEP] + text_b).logits[:, 1]
-scores = [score_a, score_b] / temperature  # τ=0.7
-loss_cls = CrossEntropyLoss(scores, label)
+In practice:
 
-# Optional: Distillation from Track B (warm prior)
-sim_a = cosine(bi_encoder(anchor), bi_encoder(text_a))
-sim_b = cosine(bi_encoder(anchor), bi_encoder(text_b))
-teacher_probs = softmax([sim_a, sim_b] / 0.7)
-student_log_probs = log_softmax(scores / 0.7)
-loss_distill = KL(teacher_probs || student_log_probs)
+- Modify the SentenceTransformer setup to include a final `Dense` layer with output dim 512.
+- Keep L2 normalization after the projection.
 
-total_loss = loss_cls + 0.3 * loss_distill
+### 3.2 Loss design: move to a unified, metric-aligned loss
+
+The current curriculum is strong, but we can simplify and better align with the evaluation metric.
+
+**New composite loss for Track B**:
+
+For each triple (anchor, A, B) with label 1 if A is closer, 0 if B is closer:
+
+1. Encode: `e_anchor, e_a, e_b` (normalized).
+2. Compute cosine similarities: `s_a = cos(e_anchor, e_a)`, `s_b = cos(e_anchor, e_b)`.
+3. Define **margin ranking loss**:
+   - Let `y = +1` if A is closer, `y = -1` if B is closer.
+   - Use `MarginRankingLoss` on `(s_a, s_b, y)` with margin `m` (e.g., 0.2).
+4. Add **pairwise softmax classification loss** on scores `[s_a, s_b]` with temperature τ:
+   - This is similar to your current PairwiseSoftmaxLoss, but you combine it with the margin loss.
+
+Overall:
+
+```text
+L_total = L_rank_margin + α * L_pairwise_softmax + β * L_MNR + γ * L_simcse
 ```
 
-**Hyperparameters**:
-- Epochs: 5 per fold
-- Batch size: 2 (pairwise scoring doubles memory)
-- Learning rate: 1e-5
-- Warmup ratio: 0.1
-- Temperature: 0.7
-- Distillation weight: 0.3
-- Early stopping patience: 3 epochs
+Where:
 
-**Result**: 5 fold models saved to `models/track_a_cross_encoder_fold{0-4}`
+- `L_rank_margin`: `MarginRankingLoss` on (s_a, s_b).
+- `L_pairwise_softmax`: cross-entropy over `[s_a, s_b]` with temperature `τ ≈ 0.7`.
+- `L_MNR`: MultipleNegativesRankingLoss on (anchor, positive) pairs, as you already use.
+- `L_simcse`: optional SimCSE-style **consistency loss** where you apply two different
+  dropout/noise views to the same story and maximize agreement between embeddings.
 
-### Stage 3: Track A → Track B Distillation (Optional)
+Suggested coefficients (to tune coarsely on dev):
 
-**Configuration** (`config.yaml`):
-```yaml
-track_b:
-  distill_from_teacher: true  # Enable A→B distillation
-  run_distill_only: false     # If true, skip phases 1-3 and only run distillation
-  teacher_model_paths: [...]  # List of Track A fold model paths
-  distill_weight: 0.5
-  distill_temperature: 0.7
-```
+- α = 0.5
+- β = 0.5
+- γ = 0.1
 
-**When to use**:
-- Set `distill_from_teacher: true` to refine Track B after Track A training
-- Set `run_distill_only: true` if you already have a trained Track B and only want to apply distillation
-- Requires Track A fold models to exist
+### 3.3 Hard negative mining
 
-**Teacher Setup**:
-- Ensemble of 5 Track A fold models
-- Average logits across folds for robust teaching
+With only 200 triples, a lot of the generalization comes from **how negatives are chosen**.
 
-**Student**: Track B bi-encoder (from Stage 1)
+Add a simple **offline hard-negative mining** step:
 
-**Distillation Process**:
-```python
-# Teacher ensemble predictions
-for each fold_model:
-    score_a_fold = fold_model(anchor, text_a).logits[:, 1]
-    score_b_fold = fold_model(anchor, text_b).logits[:, 1]
-teacher_scores = average([score_a, score_b]) / 0.7
-teacher_probs = softmax(teacher_scores)
+1. After an initial training pass (e.g., after the current Phase 2),
+   encode all stories with Track B.
+2. For each anchor A_i, retrieve its **K nearest neighbors** (by cosine) from the pool
+   of *non-positive* candidates.
+3. Build new triples where:
+   - Positive = known closer story.
+   - Negative = one of these **top-K nearest but incorrect** candidates.
 
-# Student bi-encoder predictions
-sim_a = cosine(student(anchor), student(text_a))
-sim_b = cosine(student(anchor), student(text_b))
-student_scores = [sim_a, sim_b] / 0.7
-student_log_probs = log_softmax(student_scores)
+Use these mined triples in an extra “Phase HN” with the composite loss above. This focuses
+the model on the hardest distinctions and often adds +1–2% accuracy on small ranking datasets.
 
-# Combined loss
-loss = CrossEntropyLoss(student_scores, label) + 0.5 * KL(teacher_probs || student_log_probs)
-```
+### 3.4 Regularization and small-data strategies
 
-**Hyperparameters**:
-- Distillation weight: 0.5 (stronger than B→A)
-- Temperature: 0.7
-- Batch size: 2
-- 1 epoch of distillation
+To avoid overfitting:
 
-**Result**: Refined bi-encoder with cross-encoder knowledge (typically +2-3% accuracy)
+- Use **weight decay ~0.05–0.1** for the new projection head, slightly lower (0.01) for the
+  backbone.
+- Add **dropout 0.1–0.2** in the projection head.
+- Keep `max_seq_length` at 384; do not increase beyond that to avoid noise from long tails.
+- Enable gradient checkpointing (already done) and mixed precision (already done).
+
+### 3.5 Model selection for Track B
+
+Instead of relying only on intermediate evaluation during `fit`, add a final **hyperparameter
+sweep (small grid)** on:
+
+- Temperature τ ∈ {0.5, 0.7, 1.0}
+- Margin m ∈ {0.1, 0.2, 0.3}
+
+For each checkpoint, recompute the triple-wise accuracy on dev using cosine similarity, and pick
+the best combination. Since dev is tiny, this is very cheap and can yield +0.5–1% accuracy.
 
 ---
 
-## 5. Inference
+## 4. New Track A: Lightweight Head over Track B Embeddings
 
-### Track A Inference
+Instead of a full cross-encoder that reprocesses text, we build **Track A directly on top of Track B**.
 
-**Ensemble Mode** (recommended):
-1. Load all 5 fold models
-2. For each sample:
-   - Each model computes `score_a` and `score_b`
-   - Apply temperature scaling: `scores / 0.7`
-   - Average scaled scores across models
-   - Predict: A is closer if `avg_score_a > avg_score_b`
+### 4.1 Architecture
 
-**Configuration**:
-```yaml
-use_ensemble: true
-ensemble_method: "average"  # average logits (better than voting)
-temperature: 0.7  # MUST match training
+Given Track B embeddings `e_anchor, e_a, e_b` (dim 512 after projection):
+
+1. Construct **pairwise features** for A and B:
+
+```text
+φ(a) = [e_anchor, e_a, |e_anchor - e_a|, e_anchor ⊙ e_a]  ∈ R^{4d}
+φ(b) = [e_anchor, e_b, |e_anchor - e_b|, e_anchor ⊙ e_b]
 ```
 
-### Track B Inference
+2. Pass each φ through a **small 2-layer MLP**:
 
-**Single Model**:
-1. Encode each story independently
-2. Compute cosine similarities
-3. Predict: A is closer if `cos(anchor, A) > cos(anchor, B)`
-
----
-
-## 6. Key Implementation Details
-
-### Temperature Scaling
-
-**Critical**: Temperature must be consistent across training and inference!
-
-**Training** (`train_track_a.py:326`):
-```python
-scores = scores / temperature  # 0.7
+```text
+h_a = MLP(φ(a))  → scalar score s_a
+h_b = MLP(φ(b))  → scalar score s_b
 ```
 
-**Inference** (`track_a.py:362`):
-```python
-all_scores_a = all_scores_a / predictor.temperature  # 0.7
-all_scores_b = all_scores_b / predictor.temperature  # 0.7
+MLP example:
+
+- Layer 1: Linear(4d → 2d) + GELU + Dropout(0.2)
+- Layer 2: Linear(2d → 1)
+
+3. Track A prediction uses the same **pairwise softmax** as now:
+
+```text
+scores = [s_a, s_b] / τ_a
+p = softmax(scores)
 ```
 
-### Data Augmentation
+This is analogous to your current pairwise cross-encoder, but the heavy transformer is replaced
+by one forward pass of Track B plus a tiny MLP. The **model capacity is much smaller**, which is
+ideal for a 200-example dataset.
 
-**Swap Augmentation** (enabled in `config.yaml`):
-- Original: `(anchor, A, B, label=1)` if A is closer
-- Augmented: `(anchor, B, A, label=0)` 
-- **Effect**: Doubles dataset size (200 → 400 samples)
-- **Purpose**: Position invariance
+### 4.2 Training objective for Track A head
 
-### K-Fold Cross-Validation
+For each triple (anchor, A, B, label):
 
-**Setup**:
-- 5 folds (sklearn KFold with shuffle, seed=42)
-- Each fold: 80% train (160 samples), 20% val (40 samples)
-- **Important**: Folds split the original 200 samples, not the augmented 400
+- Use **cross-entropy loss** on `[s_a, s_b]` (label in {0,1} as “A closer?”).
+- Add **distillation from the current Track B** decision, but now in the opposite direction:
+  - Teacher scores: `[cos(e_anchor, e_a) / τ_b, cos(e_anchor, e_b) / τ_b]`.
+  - Student scores: `[s_a / τ_b, s_b / τ_b]`.
+  - KL divergence between teacher softmax and student softmax.
 
-**Validation Accuracy**: 93% (average across 5 folds)
-**Inference Accuracy**: 89% (on full 200-sample test set)
-**Gap**: 4% is normal due to:
-  - Validation on same distribution as training
-  - Small dataset variance
-  - Slight overfitting to validation folds
+Total loss:
 
-### Memory Optimization (T4 GPU)
-
-- Gradient checkpointing: Enabled
-- Mixed precision (FP16): Enabled
-- Reduced batch sizes: 2-8 depending on phase
-- Gradient accumulation: 2 steps
-- Max sequence length: 384 (Track B), 512 (Track A)
-
----
-
-## 7. Performance Summary
-
-### Track A (Cross-Encoder)
-- **Validation**: 93% (K-fold average)
-- **Inference**: 89% (true generalization)
-- **Ensemble benefit**: ~2-3% over single model
-
-### Track B (Bi-Encoder)
-- **After Phase 3**: ~85-87%
-- **After distillation**: ~88-90%
-- **Distillation gain**: ~2-3%
-
----
-
-## 8. Configuration Reference
-
-**Key parameters in `config.yaml`**:
-
-```yaml
-# Track B
-track_b:
-  base_model: "BAAI/bge-large-en-v1.5"
-  epochs_mnr: 3
-  epochs_pairwise: 4
-  epochs_triplet: 3
-  temperature: 0.7
-  triplet_margin: 0.5
-  max_seq_length: 384
-  # Optional: A→B distillation (Stage 3)
-  distill_from_teacher: true      # Enable distillation from Track A
-  run_distill_only: false         # Skip phases 1-3, only distill
-  teacher_model_paths: [...]      # Paths to Track A fold models
-  distill_weight: 0.5
-  distill_temperature: 0.7
-
-# Track A
-track_a:
-  base_model: "BAAI/bge-large-en-v1.5"
-  epochs: 5
-  temperature: 0.7
-  distill_weight: 0.3
-  use_kfold: true
-  n_folds: 5
-  use_ensemble: true
-  ensemble_method: "average"
-  max_length: 512
-
-# Augmentation
-augmentation:
-  swap_ab: true
+```text
+L_A = L_ce + λ_distill * KL(softmax_b || softmax_head)
 ```
 
+Suggested λ_distill ≈ 0.3.
+
+### 4.3 Fine-tuning strategy
+
+Two modes:
+
+1. **Head-only training (recommended first)**:
+   - Freeze all Track B parameters.
+   - Train only the MLP head on top of frozen embeddings.
+   - This greatly reduces overfitting risk and training instability.
+
+2. **Light joint fine-tuning (optional second stage)**:
+   - Unfreeze the last 2–4 transformer layers of Track B + projection head.
+   - Apply a **much smaller learning rate** (e.g., 1e-6) to those layers, 1e-4 to the MLP head.
+   - Train for 1–2 more epochs with strong weight decay and early stopping on dev.
+
+Because the head is tiny, you can still use **5-fold cross-validation** for robustness and then
+ensemble the heads (average scores).
+
+### 4.4 Inference for Track A
+
+Given a triple (anchor, A, B):
+
+1. Encode `anchor`, `A`, `B` once with Track B → get embeddings.
+2. Construct φ(a), φ(b), run through the MLP head(s).
+3. For an ensemble of heads:
+   - Average `[s_a, s_b]` over heads, then apply temperature scaling and compare.
+
+Compute accuracy exactly as the competition expects. This approach is fully compliant with Track A
+because the decision is still made directly from the triple; the fact that embeddings come from
+Track B is internal to the system.
+
 ---
 
-## 9. Differences from Original APPROACH.md
+## 5. Joint Calibration & Late Fusion
 
-This updated document reflects the **actual implementation**:
+Once you have a strong Track B and a calibrated Track A head, you can combine them at inference.
 
-1. **Track A architecture**: Uses pairwise scoring (not traditional cross-encoder head)
-2. **Training order**: Correctly documented as MNR → Pairwise → Triplet
-3. **Temperature scaling**: Explicitly documented in inference
-4. **K-fold details**: Clarified that folds split original data, not augmented
-5. **Performance numbers**: Added actual validation vs inference accuracy
-6. **Memory optimizations**: Documented T4 GPU-specific settings
-7. **Configuration**: Added reference to actual `config.yaml` parameters
+For each triple:
+
+- Feature 1: Δ_cos = cos(e_anchor, e_a) − cos(e_anchor, e_b).
+- Feature 2: Δ_head = s_a − s_b.
+
+Use the dev triples to fit a **tiny logistic regression or even a 1D threshold** on the pair
+(Δ_cos, Δ_head):
+
+```text
+P(A closer) = σ(w1 * Δ_cos + w2 * Δ_head + b)
+```
+
+Then, at inference, you use this calibrated probability to choose A or B.
+
+Because this “meta-model” has only 2–3 parameters, it is very robust even with 200 samples, and it
+lets you **trust the bi-encoder more when it is confident**, and the head more when the cross-
+feature agrees. In practice this often gives another +0.5–1.5% absolute accuracy.
+
+This late-fusion layer is purely post-processing on scores and does **not** violate any Track A or
+Track B constraints.
 
 ---
 
-## 10. Summary
+## 6. Practical Implementation Notes
 
-This approach achieves **89% inference accuracy** on Track A through:
-1. Strong bi-encoder foundation (Track B with 3-phase curriculum)
-2. Cross-encoder with pairwise scoring (Track A initialized from Track B)
-3. Bidirectional distillation (B→A regularization, A→B refinement)
-4. 5-fold ensemble with logit averaging
-5. Consistent temperature scaling (0.7) across training and inference
+### 6.1 Where to modify Track B (train_track_b.py)
 
-The 4% gap between validation (93%) and inference (89%) is expected and normal for this dataset size.
+- **Projection head**:
+  - Add a `Dense` / linear module after the encoder to project to 512 dims + LayerNorm.
+- **Unified loss**:
+  - Replace or augment the current phase structure with a loop that, for each batch of
+    triples, computes `L_rank_margin`, `L_pairwise_softmax`, and, optionally, `L_MNR` and `L_simcse`.
+  - You can reuse your current PairwiseSoftmaxLoss implementation with minor adjustments.
+
+- **Hard negative mining**:
+  - After a first training run, add a small script that:
+    - Encodes all stories.
+    - Builds mined triples.
+    - Saves them as an extra JSONL.
+  - In a second run, mix original and mined triples for training.
+
+- **Hyperparameter sweep**:
+  - Add a small grid search loop over τ and margin m using the dev triples evaluation already
+    implemented at the end of `train_track_b.py`.
+
+### 6.2 Where to modify Track A (train_track_a.py)
+
+- Replace the `AutoModelForSequenceClassification` backbone with a **simple MLP head** that
+  consumes frozen Track B embeddings instead of token IDs.
+- Reuse the existing dataset and dataloader logic, but change the `__getitem__` to return raw
+  texts, then inside the training loop call the Track B model to get embeddings.
+- Implement the head as a `torch.nn.Module` with the feature construction described above.
+- Keep k-fold logic and early stopping unchanged.
+
+If GPU memory is a concern, embeddings can be **precomputed and cached** for all dev examples, and
+only the MLP head is trained over cached vectors.
+
+### 6.3 Inference scripts (track_a.py, track_b.py)
+
+- **Track B (track_b.py)**:
+  - No change in external API: still encode each story into a vector and save it.
+  - Ensure you use the final 512-dim projected embedding.
+
+- **Track A (track_a.py)**:
+  - Replace the cross-encoder predictor with:
+    - Load Track B model.
+    - Load the trained MLP head (or ensemble of heads).
+    - For each triple, compute embeddings once and pass through the head(s).
+  - Optionally include the late-fusion logistic regression layer:
+
+    ```python
+    delta_cos = sim_a - sim_b
+    delta_head = score_a - score_b
+    logit = w1 * delta_cos + w2 * delta_head + b
+    pred = logit > 0
+    ```
+
+---
+
+## 7. Expected Impact
+
+While actual gains depend on hidden test data, this v2 approach should:
+
+- **Track B**:
+  - Improve robustness via:
+    - Better metric-aligned loss (margin + softmax).
+    - Hard negative mining.
+    - Projection + stronger regularization.
+  - Expected gain: **+1–2% absolute** over the current ~0.94, if there is remaining headroom.
+
+- **Track A**:
+  - Eliminate heavy cross-encoder overfitting by using a small head on a strong embedding space.
+  - Enforce full consistency with Track B because both operate on the same embeddings.
+  - Late fusion can leverage differences between cosine and head scores.
+  - Expected gain: **+2–3% absolute** over the current ~0.89, making Track A competitive with or
+    slightly better than Track B.
+
+The key philosophy is: **One powerful, metric-aligned bi-encoder (Track B) + a tiny interaction
+layer (Track A) + simple calibration** is a better match to the very low-data regime of this task
+than two large, independently trained transformers.

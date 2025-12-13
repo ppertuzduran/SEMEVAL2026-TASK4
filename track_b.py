@@ -121,6 +121,14 @@ def main():
     print(f"  ({len(data)/inference_time:.1f} samples/sec)")
     print(f"  Shape: {embeddings.shape}")
     
+    # Verify embedding dimension (should be 512 with v2 projection head)
+    expected_dim = 512
+    if embeddings.shape[1] != expected_dim:
+        print(f"⚠️  Warning: Expected {expected_dim}-dim embeddings, got {embeddings.shape[1]}-dim")
+        print(f"  Make sure you're using a Track B model with projection head!")
+    else:
+        print(f"✓ Verified: {expected_dim}-dim embeddings (v2 projection head)")
+    
     # Create lookup for evaluation
     embedding_lookup = dict(zip(data["text"], embeddings))
     

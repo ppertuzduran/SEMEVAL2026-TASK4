@@ -1,16 +1,13 @@
 """
-Training script for Track B: Bi-encoder (embedding model).
+Training script for Track B: Bi-encoder with projection head (v2).
 
 Google Colab training script.
 
-This script implements recommendations from APPROACH.md:
-- Multi-phase training curriculum (section 4.2):
-  * Phase 1: Pairwise Softmax Loss (direct metric optimization)
-  * Phase 2: TripletLoss (margin-based metric learning)
-  * Phase 3: MultipleNegativesRankingLoss (contrastive learning)
-- Temperature scaling for gradient sharpening (section 4.1.2)
-- Support for BGE-base and BGE-large models (section 4.1)
-- L2 normalization of embeddings (section 4.1.2)
+This script implements the v2 approach from APPROACH.md:
+- 512-dim projection head for better generalization on small datasets
+- Unified composite loss (MarginRanking + PairwiseSoftmax + MNR)
+- Removes obsolete A→B distillation logic
+- Temperature scaling for gradient sharpening
 - Mixed precision training (FP16)
 - Saves models to Google Drive
 """
@@ -25,12 +22,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 import yaml
 from torch.utils.data import DataLoader, Dataset
-from sentence_transformers import SentenceTransformer, InputExample, losses
+from sentence_transformers import SentenceTransformer, InputExample, losses, models
 from sentence_transformers.evaluation import SequentialEvaluator
 from tqdm import tqdm
 import pandas as pd
 from sentence_transformers.util import cos_sim
-from transformers import AutoTokenizer, AutoModelForSequenceClassification
 from colab_utils import is_colab, setup_colab_environment, update_config_for_colab, install_colab_dependencies, print_gpu_info
 
 
@@ -90,9 +86,23 @@ def create_pair_examples(pairs: list) -> list:
     return examples
 
 
+def create_triple_softmax_examples(data: list) -> list:
+    """
+    Create examples for PairwiseSoftmaxLoss.
+    Each example contains (anchor, text_a, text_b, label).
+    """
+    examples = []
+    for item in data:
+        examples.append(InputExample(
+            texts=[item['anchor'], item['text_a'], item['text_b']],
+            label=float(item['label'])
+        ))
+    return examples
+
+
 class PairwiseSoftmaxLoss(nn.Module):
     """
-    NEW: Direct triple-wise pairwise softmax loss with temperature scaling.
+    Direct triple-wise pairwise softmax loss with temperature scaling.
     
     Directly optimizes the evaluation metric by:
     1. Encoding anchor, text_a, text_b independently
@@ -138,31 +148,79 @@ class PairwiseSoftmaxLoss(nn.Module):
         return loss
 
 
-class DistillDataset(Dataset):
-    """Dataset for teacher → student distillation (cross-encoder to bi-encoder)."""
-
-    def __init__(self, data):
-        self.data = data
-
-    def __len__(self):
-        return len(self.data)
-
-    def __getitem__(self, idx):
-        return self.data[idx]
-
-
-def create_triple_softmax_examples(data: list) -> list:
+class MarginRankingLossCustom(nn.Module):
     """
-    Create examples for PairwiseSoftmaxLoss.
-    Each example contains (anchor, text_a, text_b, label).
+    Margin ranking loss for metric-aligned training.
+    
+    For each triple (anchor, A, B) with label indicating which is closer:
+    - Computes cosine similarities
+    - Applies margin ranking loss to enforce correct ordering
     """
-    examples = []
-    for item in data:
-        examples.append(InputExample(
-            texts=[item['anchor'], item['text_a'], item['text_b']],
-            label=float(item['label'])
-        ))
-    return examples
+    
+    def __init__(self, model: SentenceTransformer, margin: float = 0.2):
+        super(MarginRankingLossCustom, self).__init__()
+        self.model = model
+        self.margin = margin
+        self.loss_fn = nn.MarginRankingLoss(margin=margin)
+    
+    def forward(self, sentence_features, labels):
+        """
+        sentence_features: [anchor_features, text_a_features, text_b_features]
+        labels: Tensor with 1 if A is closer, 0 if B is closer
+        """
+        # Encode all three texts
+        embeddings = [self.model(sf)['sentence_embedding'] for sf in sentence_features]
+        anchor_emb = embeddings[0]
+        a_emb = embeddings[1]
+        b_emb = embeddings[2]
+        
+        # Compute cosine similarities
+        sim_a = F.cosine_similarity(anchor_emb, a_emb, dim=1)
+        sim_b = F.cosine_similarity(anchor_emb, b_emb, dim=1)
+        
+        # Convert labels: 1 if A closer (y=+1), 0 if B closer (y=-1)
+        y = 2 * labels - 1  # Convert {0,1} to {-1,+1}
+        
+        # MarginRankingLoss expects: loss(x1, x2, y) where y=+1 means x1 > x2
+        loss = self.loss_fn(sim_a, sim_b, y)
+        return loss
+
+
+class CompositeLoss(nn.Module):
+    """
+    Composite loss combining multiple objectives for robust training.
+    
+    Combines:
+    - MarginRankingLoss: metric-aligned ranking
+    - PairwiseSoftmaxLoss: direct metric optimization
+    - MultipleNegativesRankingLoss: contrastive learning (applied separately)
+    """
+    
+    def __init__(
+        self,
+        model: SentenceTransformer,
+        margin: float = 0.2,
+        temperature: float = 0.7,
+        weight_margin: float = 1.0,
+        weight_pairwise: float = 0.5
+    ):
+        super(CompositeLoss, self).__init__()
+        self.margin_loss = MarginRankingLossCustom(model, margin=margin)
+        self.pairwise_loss = PairwiseSoftmaxLoss(model, temperature=temperature)
+        self.weight_margin = weight_margin
+        self.weight_pairwise = weight_pairwise
+    
+    def forward(self, sentence_features, labels):
+        """Compute weighted combination of losses."""
+        loss_margin = self.margin_loss(sentence_features, labels)
+        loss_pairwise = self.pairwise_loss(sentence_features, labels)
+        
+        total_loss = (
+            self.weight_margin * loss_margin +
+            self.weight_pairwise * loss_pairwise
+        )
+        
+        return total_loss
 
 
 def evaluate_on_track_a(model, dev_path: str, device: str) -> float:
@@ -232,6 +290,46 @@ class CustomEvaluator:
         return accuracy
 
 
+def add_projection_head(model: SentenceTransformer, projection_dim: int):
+    """
+    Add a projection head to reduce embedding dimensionality.
+    
+    This adds: Dense(1024 → projection_dim) + LayerNorm + L2 normalization
+    """
+    # Get the current pooling dimension
+    word_embedding_dimension = model.get_sentence_embedding_dimension()
+    
+    # Add dense projection layer
+    dense = models.Dense(
+        in_features=word_embedding_dimension,
+        out_features=projection_dim,
+        activation_function=nn.Identity()  # No activation, just linear projection
+    )
+    
+    # Add layer normalization for stability
+    # Note: SentenceTransformer already has Normalize layer at the end for L2 norm
+    
+    # Add to model (insert before the final Normalize layer)
+    # Remove the last Normalize layer, add Dense, then add Normalize back
+    modules = list(model._modules.values())
+    
+    # Find and remove Normalize layer if it exists
+    if len(modules) > 0 and isinstance(modules[-1], models.Normalize):
+        normalize_layer = modules[-1]
+        modules = modules[:-1]
+    else:
+        normalize_layer = models.Normalize()
+    
+    # Rebuild model with projection
+    modules.append(dense)
+    modules.append(normalize_layer)
+    
+    # Create new model with updated modules
+    new_model = SentenceTransformer(modules=modules)
+    
+    return new_model
+
+
 def main():
     """Main training pipeline - Google Colab only."""
     if not is_colab():
@@ -240,7 +338,7 @@ def main():
         sys.exit(1)
     
     print("="*60)
-    print("TRACK B TRAINING - GOOGLE COLAB")
+    print("TRACK B TRAINING (V2) - GOOGLE COLAB")
     print("="*60)
     
     # Setup Colab environment
@@ -259,24 +357,29 @@ def main():
     if device == 'cuda':
         print(f"GPU: {torch.cuda.get_device_name(0)}")
     
-    # Load base model (shared backbone for both tracks)
-    run_distill_only = config['track_b'].get('run_distill_only', False)
-    if run_distill_only:
-        print(f"\nLoading pre-trained model for distillation only: {config['track_b']['model_save_path']}")
-        model = SentenceTransformer(config['track_b']['model_save_path'], device=device)
-    else:
-        print(f"\nLoading base model: {config['track_b']['base_model']}")
-        model = SentenceTransformer(config['track_b']['base_model'], device=device)
-    # Shorten max sequence length to save VRAM (affects tokenizer inside ST)
+    # Load base model
+    print(f"\nLoading base model: {config['track_b']['base_model']}")
+    model = SentenceTransformer(config['track_b']['base_model'], device=device)
+    
+    # Add projection head (v2 feature)
+    projection_dim = config['track_b'].get('projection_dim', 512)
+    print(f"\nAdding {projection_dim}-dim projection head...")
+    model = add_projection_head(model, projection_dim)
+    print(f"✓ Model now outputs {projection_dim}-dimensional embeddings")
+    
+    # Shorten max sequence length to save VRAM
     if 'max_seq_length' in config['track_b']:
         model.max_seq_length = config['track_b']['max_seq_length']
-        print(f"Set SentenceTransformer max_seq_length={model.max_seq_length}")
+        print(f"Set max_seq_length={model.max_seq_length}")
+    
+    # Enable gradient checkpointing
     if config['track_b'].get('enable_gradient_checkpointing', True):
         try:
             model._first_module().auto_model.gradient_checkpointing_enable()
             print("Enabled gradient checkpointing for memory savings.")
         except Exception as e:
             print(f"Warning: could not enable gradient checkpointing: {e}")
+    
     try:
         model._first_module().auto_model.config.use_cache = False
         print("Disabled transformer cache to reduce memory.")
@@ -294,7 +397,7 @@ def main():
     print(f"Loaded {len(pairs)} pairs")
     
     # Load cross-encoder data for pairwise softmax loss
-    print("Loading cross-encoder data for pairwise softmax...")
+    print("Loading cross-encoder data for composite loss...")
     cross_encoder_data = []
     with open(prepared_dir / "cross_encoder_data.jsonl", 'r', encoding='utf-8') as f:
         for line in f:
@@ -317,52 +420,42 @@ def main():
     print(f"\nTrain triplets: {len(train_triplets)}")
     print(f"Val triplets: {len(val_triplets)}")
     print(f"Train pairs: {len(train_pairs)}")
-    print(f"Train cross-encoder (for pairwise softmax): {len(train_cross_encoder)}")
+    print(f"Train cross-encoder (for composite loss): {len(train_cross_encoder)}")
     
     # Create InputExamples
-    triplet_examples = create_triplet_examples(train_triplets)
     pair_examples = create_pair_examples(train_pairs)
     triple_softmax_examples = create_triple_softmax_examples(train_cross_encoder)
     
-    # Create DataLoaders with per-phase batch sizes to avoid OOM on large models
+    # Create DataLoaders
     batch_size = config['track_b']['batch_size']
-    batch_size_mnr = config['track_b'].get('batch_size_mnr', batch_size)
-    batch_size_pairwise = config['track_b'].get('batch_size_pairwise', batch_size)
-    batch_size_triplet = config['track_b'].get('batch_size_triplet', batch_size)
-
-    triplet_loader = DataLoader(
-        triplet_examples,
-        batch_size=batch_size_triplet,
-        shuffle=True
-    )
-
+    
     pair_loader = DataLoader(
         pair_examples,
-        batch_size=batch_size_mnr,
+        batch_size=batch_size * 2,  # MNR can handle larger batches
         shuffle=True
     )
-
+    
     triple_softmax_loader = DataLoader(
         triple_softmax_examples,
-        batch_size=batch_size_pairwise,
+        batch_size=batch_size,
         shuffle=True
     )
     
     # Setup losses
-    triplet_loss = losses.TripletLoss(
-        model=model,
-        distance_metric=losses.TripletDistanceMetric.COSINE,
-        triplet_margin=config['track_b']['triplet_margin']
-    )
-    
+    # 1. MultipleNegativesRankingLoss for contrastive learning
     mnr_loss = losses.MultipleNegativesRankingLoss(model=model)
     
-    pairwise_softmax_loss = PairwiseSoftmaxLoss(
+    # 2. Composite loss (Margin + Pairwise Softmax)
+    loss_weights = config['track_b'].get('loss_weights', {})
+    composite_loss = CompositeLoss(
         model=model,
-        temperature=config['track_b'].get('temperature', 1.0)
+        margin=config['track_b'].get('margin', 0.2),
+        temperature=config['track_b'].get('temperature', 0.7),
+        weight_margin=loss_weights.get('margin', 1.0),
+        weight_pairwise=loss_weights.get('pairwise', 0.5)
     )
     
-    # Training parameters per phase
+    # Training parameters
     warmup_steps = config['track_b']['warmup_steps']
     
     # Setup evaluator
@@ -373,189 +466,56 @@ def main():
     )
     evaluator = SequentialEvaluator([base_evaluator])
     
-    # Phase 1: MultipleNegativesRankingLoss (global structure)
-    if not run_distill_only and config['track_b'].get('use_multiple_negatives_ranking', True) and len(pair_examples) > 0:
-        print("\n" + "="*60)
-        print("Phase 1: MultipleNegativesRankingLoss (global structure)...")
-        print("="*60)
-        model.fit(
-            train_objectives=[(pair_loader, mnr_loss)],
-            epochs=config['track_b']['epochs_mnr'],
-            warmup_steps=warmup_steps,
-            optimizer_params={'lr': config['track_b']['learning_rate']},
-            weight_decay=config['track_b']['weight_decay'],
-            evaluation_steps=config['track_b']['eval_steps'],
-            evaluator=evaluator,
-            output_path=config['track_b']['model_save_path'] + "_mnr",
-            save_best_model=False,
-            use_amp=config['track_b']['mixed_precision']
-        )
-        model = SentenceTransformer(config['track_b']['model_save_path'], device=device)
-        base_evaluator.best_accuracy = base_evaluator(model, "", 0, 0)
+    # V2 Unified Training with Composite Loss
+    print("\n" + "="*60)
+    print("V2 UNIFIED TRAINING: Composite Loss (MNR + Margin + Pairwise)")
+    print("="*60)
     
-    # Phase 2: PairwiseSoftmaxLoss (metric-aligned)
-    if not run_distill_only and config['track_b'].get('use_pairwise_softmax', True) and len(triple_softmax_examples) > 0:
-        print("\n" + "="*60)
-        print("Phase 2: PairwiseSoftmaxLoss (metric aligned)...")
-        print("="*60)
-        model.fit(
-            train_objectives=[(triple_softmax_loader, pairwise_softmax_loss)],
-            epochs=config['track_b']['epochs_pairwise'],
-            warmup_steps=warmup_steps,
-            optimizer_params={'lr': config['track_b']['learning_rate']},
-            weight_decay=config['track_b']['weight_decay'],
-            evaluation_steps=config['track_b']['eval_steps'],
-            evaluator=evaluator,
-            output_path=config['track_b']['model_save_path'] + "_pairwise",
-            save_best_model=False,
-            use_amp=config['track_b']['mixed_precision']
-        )
-        model = SentenceTransformer(config['track_b']['model_save_path'], device=device)
-        base_evaluator.best_accuracy = base_evaluator(model, "", 0, 0)
-        
-    # Phase 3: TripletLoss (fine-grained discrimination)
-    if not run_distill_only and len(triplet_examples) > 0:
-        print("\n" + "="*60)
-        print("Phase 3: TripletLoss (fine-grained)...")
-        print("="*60)
-        model.fit(
-            train_objectives=[(triplet_loader, triplet_loss)],
-            epochs=config['track_b']['epochs_triplet'],
-            warmup_steps=max(1, warmup_steps // 2),
-            optimizer_params={'lr': config['track_b']['learning_rate'] / 2},
-            weight_decay=config['track_b']['weight_decay'],
-            evaluation_steps=config['track_b']['eval_steps'],
-            evaluator=evaluator,
-            output_path=config['track_b']['model_save_path'] + "_triplet",
-            save_best_model=False,
-            use_amp=config['track_b']['mixed_precision']
-        )
-        model = SentenceTransformer(config['track_b']['model_save_path'], device=device)
-        base_evaluator.best_accuracy = base_evaluator(model, "", 0, 0)
-
-    # Optional Phase 4: Distillation from Track A cross-encoder (teacher → student)
-    if run_distill_only or config['track_b'].get('distill_from_teacher', False):
-        teacher_paths = config['track_b'].get('teacher_model_paths', [config['track_b'].get('teacher_model_path')])
-        print(f"Checking teacher models: {teacher_paths}")
-        valid_teachers = [p for p in teacher_paths if Path(p).exists()]
-        if valid_teachers:
-            print(f"✓ Found {len(valid_teachers)} teacher models")
-        else:
-            print("✗ No teacher models found")
-        if valid_teachers:
-            print("\n" + "="*60)
-            print(f"Phase 4: Distillation from {len(valid_teachers)} Track A cross-encoders (ensemble teacher)...")
-            print("="*60)
-            # Load all teacher models
-            teachers = []
-            teacher_tokenizer = None
-            for path in valid_teachers:
-                tokenizer = AutoTokenizer.from_pretrained(path)
-                teacher_model = AutoModelForSequenceClassification.from_pretrained(path).to(device)
-                teacher_model.eval()
-                teachers.append(teacher_model)
-                if teacher_tokenizer is None:
-                    teacher_tokenizer = tokenizer
-
-            distill_bs = config['track_b'].get('batch_size_distill', batch_size)
-            distill_dataset = DistillDataset(train_cross_encoder)
-            distill_loader = DataLoader(
-                distill_dataset,
-                batch_size=distill_bs,
-                shuffle=True
-            )
-
-            optimizer = torch.optim.AdamW(model.parameters(), lr=config['track_b']['learning_rate'])
-            kl_loss = nn.KLDivLoss(reduction='batchmean')
-            ce_loss = nn.CrossEntropyLoss()
-            model.train()
-
-            for epoch in range(1):
-                pbar = tqdm(distill_loader, desc="Distill (A→B)")
-                for batch in pbar:
-                    anchor = batch['anchor']
-                    text_a = batch['text_a']
-                    text_b = batch['text_b']
-                    labels = batch['label'].to(device, dtype=torch.float)
-
-                    # Teacher logits (ensemble average)
-                    with torch.no_grad():
-                        inputs_a = teacher_tokenizer(
-                            [f"{a} {teacher_tokenizer.sep_token} {b}" for a, b in zip(anchor, text_a)],
-                            max_length=512,
-                            padding='max_length',
-                            truncation=True,
-                            return_tensors='pt'
-                        )
-                        inputs_a = {k: v.to(device) for k, v in inputs_a.items()}
-                        inputs_b = teacher_tokenizer(
-                            [f"{a} {teacher_tokenizer.sep_token} {b}" for a, b in zip(anchor, text_b)],
-                            max_length=512,
-                            padding='max_length',
-                            truncation=True,
-                            return_tensors='pt'
-                        )
-                        inputs_b = {k: v.to(device) for k, v in inputs_b.items()}
-
-                        # Average logits across all teacher models
-                        t_a_list = []
-                        t_b_list = []
-                        for teacher_model in teachers:
-                            t_a = teacher_model(**inputs_a).logits[:, 1]
-                            t_b = teacher_model(**inputs_b).logits[:, 1]
-                            t_a_list.append(t_a)
-                            t_b_list.append(t_b)
-                        t_a_avg = torch.stack(t_a_list).mean(dim=0)
-                        t_b_avg = torch.stack(t_b_list).mean(dim=0)
-
-                        teacher_scores = torch.stack([t_a_avg, t_b_avg], dim=1) / config['track_b']['distill_temperature']
-                        teacher_probs = F.softmax(teacher_scores, dim=1)
-
-                    # Student embeddings
-                    features_anchor = model.tokenize(list(anchor))
-                    features_a = model.tokenize(list(text_a))
-                    features_b = model.tokenize(list(text_b))
-                    # Move tokenized features to device
-                    features_anchor = {k: v.to(device) for k, v in features_anchor.items()}
-                    features_a = {k: v.to(device) for k, v in features_a.items()}
-                    features_b = {k: v.to(device) for k, v in features_b.items()}
-                    anchor_emb = model(features_anchor)['sentence_embedding']
-                    a_emb = model(features_a)['sentence_embedding']
-                    b_emb = model(features_b)['sentence_embedding']
-                    sim_a = F.cosine_similarity(anchor_emb, a_emb, dim=1)
-                    sim_b = F.cosine_similarity(anchor_emb, b_emb, dim=1)
-                    student_scores = torch.stack([sim_a, sim_b], dim=1) / config['track_b']['distill_temperature']
-                    student_log_probs = F.log_softmax(student_scores, dim=1)
-
-                    # Loss = supervised CE + KL distill
-                    targets = (1 - labels.long()).to(device)
-                    loss_ce = ce_loss(student_scores, targets)
-                    loss_kl = kl_loss(student_log_probs, teacher_probs)
-                    loss = loss_ce + config['track_b']['distill_weight'] * loss_kl
-
-                    optimizer.zero_grad()
-                    loss.backward()
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), config['track_b']['gradient_clip'])
-                    optimizer.step()
-
-                    pbar.set_postfix({"loss": loss.item()})
-
-            # Save distilled model
-            model.save(config['track_b']['model_save_path'])
-            base_evaluator.best_accuracy = base_evaluator(model, "", 0, 0)
-        else:
-            print("Distillation skipped: teacher model not found.")
+    # Combine MNR and Composite loss in multi-objective training
+    train_objectives = []
+    
+    # Add MNR if we have pair data
+    if len(pair_examples) > 0:
+        weight_mnr = loss_weights.get('mnr', 0.5)
+        if weight_mnr > 0:
+            train_objectives.append((pair_loader, mnr_loss))
+            print(f"✓ Added MultipleNegativesRankingLoss (weight: {weight_mnr})")
+    
+    # Add Composite loss if we have triple data
+    if len(triple_softmax_examples) > 0:
+        train_objectives.append((triple_softmax_loader, composite_loss))
+        print(f"✓ Added CompositeLoss (Margin + Pairwise)")
+    
+    if not train_objectives:
+        print("❌ No training data available!")
+        sys.exit(1)
+    
+    # Train with all objectives simultaneously
+    model.fit(
+        train_objectives=train_objectives,
+        epochs=config['track_b']['epochs'],
+        warmup_steps=warmup_steps,
+        optimizer_params={'lr': config['track_b']['learning_rate']},
+        weight_decay=config['track_b']['weight_decay'],
+        evaluation_steps=config['track_b']['eval_steps'],
+        evaluator=evaluator,
+        output_path=config['track_b']['model_save_path'] + "_temp",
+        save_best_model=False,
+        use_amp=config['track_b']['mixed_precision']
+    )
+    
+    # Load best model
+    model = SentenceTransformer(config['track_b']['model_save_path'], device=device)
     
     # Final evaluation
     print("\n" + "="*60)
     print("Training complete!")
     print("="*60)
-    final_model = SentenceTransformer(config['track_b']['model_save_path'], device=device)
-    final_accuracy = evaluate_on_track_a(final_model, config['data']['dev_track_a'], device)
+    final_accuracy = evaluate_on_track_a(model, config['data']['dev_track_a'], device)
     print(f"\nFinal best model accuracy: {final_accuracy:.4f}")
     print(f"Model saved to: {config['track_b']['model_save_path']}")
+    print(f"Embedding dimension: {projection_dim}")
 
 
 if __name__ == "__main__":
     main()
-

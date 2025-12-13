@@ -14,33 +14,30 @@ data:
   output_dir: "output"
   prepared_data_dir: "data/prepared"
 
-# Track B - Bi-encoder settings
+# Track B - Bi-encoder settings (v2: primary model with projection head)
 track_b:
   base_model: "BAAI/bge-large-en-v1.5"  # High-perf backbone per APPROACH
   model_save_path: "models/track_b_embedder"
-  # Training hyperparameters (split by curriculum stages)
-  batch_size: 6            # global fallback
-  batch_size_mnr: 8
-  batch_size_pairwise: 4   # heaviest phase; keep small on T4
-  batch_size_triplet: 6
-  batch_size_distill: 2
-  epochs_mnr: 3          # Phase 1: MultipleNegativesRankingLoss
-  epochs_pairwise: 4     # Phase 2: PairwiseSoftmaxLoss (metric-aligned)
-  epochs_triplet: 3      # Phase 3: TripletLoss with hard negatives
+  # V2 Architecture: Projection head for dimensionality reduction
+  projection_dim: 512      # Reduce from 1024 to 512 for better generalization
+  # Composite loss weights (v2 unified training)
+  loss_weights:
+    margin: 1.0            # MarginRankingLoss weight
+    pairwise: 0.5          # PairwiseSoftmaxLoss weight
+    mnr: 0.5               # MultipleNegativesRankingLoss weight
+    simcse: 0.1            # SimCSE consistency loss weight (optional)
+  margin: 0.2              # Margin for MarginRankingLoss
+  # Training hyperparameters
+  batch_size: 4            # Reduced for composite loss (more memory intensive)
+  epochs: 5                # Unified training phase
   learning_rate: 1.0e-5
   warmup_steps: 500
   weight_decay: 0.01
-  triplet_margin: 0.5
-  use_multiple_negatives_ranking: true
-  use_pairwise_softmax: true
-  temperature: 0.7       # Sharper softmax per APPROACH
-  max_seq_length: 384    # shorten sequences to save VRAM on T4
-  # Distillation from Track A cross-encoder (Stage 3 in APPROACH)
-  distill_from_teacher: true  # Set to true only if you want to run distillation separately
-  teacher_model_paths: ["/content/drive/MyDrive/narrative_similarity/models/track_a_cross_encoder_fold0", "/content/drive/MyDrive/narrative_similarity/models/track_a_cross_encoder_fold1", "/content/drive/MyDrive/narrative_similarity/models/track_a_cross_encoder_fold2", "/content/drive/MyDrive/narrative_similarity/models/track_a_cross_encoder_fold3", "/content/drive/MyDrive/narrative_similarity/models/track_a_cross_encoder_fold4"]  # List all fold paths for ensemble teacher
-  distill_weight: 0.5  # Increased for stronger distillation
-  distill_temperature: 0.7
-  run_distill_only: false # Set to true to skip phases 1-3 and only run distillation
+  temperature: 0.7         # Sharper softmax per APPROACH
+  max_seq_length: 384      # shorten sequences to save VRAM on T4
+  # Optional features
+  enable_hard_negatives: false  # Hard negative mining (optional)
+  enable_simcse: false          # SimCSE consistency loss (optional)
   # Training options
   mixed_precision: true
   gradient_clip: 1.0
@@ -48,38 +45,41 @@ track_b:
   enable_gradient_checkpointing: true
   eval_steps: 100
 
-# Track A - Cross-encoder settings
+# Track A - MLP Head settings (v2: lightweight head over Track B embeddings)
 track_a:
-  base_model: "BAAI/bge-large-en-v1.5"  # Share backbone with Track B
-  model_save_path: "models/track_a_cross_encoder"
+  architecture: "mlp_head"  # v2: MLP head instead of cross-encoder
+  model_save_path: "models/track_a_mlp_head"
+  # Track B dependency (must be trained first)
+  track_b_model_path: "/content/drive/MyDrive/narrative_similarity/models/track_b_embedder"
+  freeze_track_b: true      # Head-only training (recommended first)
+  # MLP Head architecture
+  mlp_hidden_dim: 1024      # 2d where d=512 (projection_dim)
+  mlp_dropout: 0.2
   # Training hyperparameters
-  batch_size: 2  # Reduced for OOM on T4; pairwise scoring doubles inputs
-  epochs: 5
-  learning_rate: 1.0e-5
+  batch_size: 8             # Can be larger since we're just training MLP head
+  epochs: 10                # More epochs for small head
+  learning_rate: 1.0e-4     # Higher LR for head-only training
   warmup_ratio: 0.1
   weight_decay: 0.01
-  # Model configuration
-  max_length: 512
-  num_labels: 2
+  # Loss configuration
   label_smoothing: 0.0
-  temperature: 0.7      # Sharper logits for better discrimination
-  # Distillation regularizer from Track B (Stage 2 warm prior)
-  distill_from_biencoder: true
-  teacher_biencoder_path: "/content/drive/MyDrive/narrative_similarity/models/track_b_embedder"
-  distill_weight: 0.3
+  temperature: 0.7          # Sharper logits for better discrimination
+  # Distillation from Track B cosine similarities
+  distill_weight: 0.3       # KL divergence weight from Track B
   distill_temperature: 0.7
   # Training options
   mixed_precision: true
   gradient_clip: 1.0
   eval_steps: 50
-  enable_gradient_checkpointing: true  # Added to save VRAM on T4
   use_kfold: true
   n_folds: 5
   # Ensemble settings
   use_ensemble: true
   ensemble_method: "average"
   # To run only specific folds (0-based), set e.g. [4] for fold 5 only
-  folds_to_train: null  # null means train all folds
+  folds_to_train: null      # null means train all folds
+  # Optional late fusion
+  use_late_fusion: false    # Combine Track B + Track A scores
 
 # Data augmentation
 augmentation:

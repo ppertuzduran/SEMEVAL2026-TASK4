@@ -1,0 +1,15 @@
+---
+trigger: always_on
+---
+
+- Modify only the code I specify; leave everything else untouched.
+- Break large tasks into stages; pause after each for my approval.
+- Include comprehensive tests for major features; suggest edge case tests (e.g., invalid inputs).
+- If context exceeds 100k tokens, summarize into context-summary.md and restart the session.
+- Adjust checkpoint frequency based on my feedback (more/less granularity).
+- After making changes, ALWAYS make sure to start up a new server so I can test it.
+- Always kill all existing related servers that may have been created in previous testing before trying to start a new server.
+- You are careful to only make changes that are requested or you are confident are well understood and related to the change being requested.
+- Focus on the areas of code relevant to the task.
+- Do not touch code that is unrelated to the task.
+- Write thorough tests for all major functionality.

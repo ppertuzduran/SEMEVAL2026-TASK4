@@ -1,16 +1,15 @@
 """
-Training script for Track A: Cross-encoder model.
+Training script for Track A: Lightweight MLP Head over Track B embeddings (v2).
 
 Google Colab training script.
 
-This script implements recommendations from APPROACH.md:
-- Pairwise scoring architecture (section 3.1)
-- Temperature scaling for loss calibration (section 3.2.1)
-- A/B swap augmentation for position invariance (section 3.2.2)
-- K-fold cross-validation for robust evaluation (section 3.4)
-- Mixed precision training (FP16)
-- Models support: RoBERTa-large, DeBERTa-v3-large (section 3.1)
-- Saves models to Google Drive for ensemble inference (section 3.4)
+This script implements the v2 approach from APPROACH.md:
+- Lightweight MLP head operating on frozen Track B embeddings
+- Pairwise feature construction (concat, diff, element-wise product)
+- Distillation from Track B cosine similarities
+- K-fold cross-validation for robustness
+- Head-only training (freeze Track B) or joint fine-tuning
+- Removes obsolete B→A distillation from cross-encoder
 """
 
 import json
@@ -24,17 +23,12 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 from torch.optim import AdamW
-from transformers import (
-    AutoTokenizer,
-    AutoModelForSequenceClassification,
-    get_linear_schedule_with_warmup,
-    get_cosine_schedule_with_warmup
-)
+from transformers import get_linear_schedule_with_warmup
 from sentence_transformers import SentenceTransformer
 from tqdm import tqdm
 import yaml
 import pandas as pd
-from colab_utils import is_colab, setup_colab_environment, update_config_for_colab, install_colab_dependencies, print_gpu_info
+from colab_utils import is_colab, setup_colab_environment, update_config_for_colab, print_gpu_info
 
 
 def set_seed(seed: int):
@@ -52,69 +46,81 @@ def load_config(config_path: str = "config.yaml") -> dict:
         return yaml.safe_load(f)
 
 
-def maybe_init_from_biencoder(model, biencoder_path: str):
-    """Optionally initialize backbone from Track B encoder weights."""
-    if not biencoder_path or not Path(biencoder_path).exists():
-        return
-    try:
-        biencoder = SentenceTransformer(biencoder_path)
-        encoder_state = biencoder._first_module().auto_model.state_dict()
-        base_attr = getattr(model, model.base_model_prefix, None)
-        if base_attr:
-            base_attr.load_state_dict(encoder_state, strict=False)
-            print(f"Loaded backbone weights from {biencoder_path}")
-    except Exception as e:
-        print(f"Warning: could not load backbone from bi-encoder ({biencoder_path}): {e}")
+class MLPHead(nn.Module):
+    """
+    Lightweight MLP head for pairwise ranking over embeddings.
+    
+    Architecture (from APPROACH.md section 4.1):
+    - Input: pairwise features φ(a) or φ(b) of dimension 4d
+    - Layer 1: Linear(4d → 2d) + GELU + Dropout
+    - Layer 2: Linear(2d → 1)
+    - Output: scalar score
+    """
+    
+    def __init__(self, embedding_dim: int, hidden_dim: int, dropout: float = 0.2):
+        super(MLPHead, self).__init__()
+        self.embedding_dim = embedding_dim
+        input_dim = 4 * embedding_dim  # [e1, e2, |e1-e2|, e1⊙e2]
+        
+        self.mlp = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, 1)
+        )
+    
+    def construct_pairwise_features(self, anchor_emb, candidate_emb):
+        """
+        Construct pairwise features: [e_anchor, e_cand, |e_anchor - e_cand|, e_anchor ⊙ e_cand]
+        
+        Args:
+            anchor_emb: (batch, dim)
+            candidate_emb: (batch, dim)
+        
+        Returns:
+            features: (batch, 4*dim)
+        """
+        diff = torch.abs(anchor_emb - candidate_emb)
+        prod = anchor_emb * candidate_emb
+        features = torch.cat([anchor_emb, candidate_emb, diff, prod], dim=1)
+        return features
+    
+    def forward(self, anchor_emb, candidate_emb):
+        """
+        Forward pass through MLP head.
+        
+        Args:
+            anchor_emb: (batch, dim)
+            candidate_emb: (batch, dim)
+        
+        Returns:
+            score: (batch, 1)
+        """
+        features = self.construct_pairwise_features(anchor_emb, candidate_emb)
+        score = self.mlp(features)
+        return score.squeeze(-1)  # (batch,)
 
 
 class NarrativeSimilarityDataset(Dataset):
     """
-    Dataset for pairwise scoring cross-encoder training.
+    Dataset for MLP head training.
     
-    NEW APPROACH: Score (anchor, A) and (anchor, B) separately, then apply softmax.
-    This is more stable and aligns with IR reranking best practices.
-    
-    Each sample returns both pairs for a triple.
+    Returns raw texts (not tokenized) since we'll use Track B to generate embeddings.
     """
-    def __init__(self, data: List[Dict], tokenizer, max_length: int = 512):
+    
+    def __init__(self, data: List[Dict]):
         self.data = data
-        self.tokenizer = tokenizer
-        self.max_length = max_length
     
     def __len__(self):
         return len(self.data)
     
     def __getitem__(self, idx):
         item = self.data[idx]
-        
-        # Pairwise scoring: encode (anchor, text_a) and (anchor, text_b) separately
-        text_a_pair = f"{item['anchor']} {self.tokenizer.sep_token} {item['text_a']}"
-        encoding_a = self.tokenizer(
-            text_a_pair,
-            max_length=self.max_length,
-            padding='max_length',
-            truncation=True,
-            return_tensors='pt'
-        )
-        
-        text_b_pair = f"{item['anchor']} {self.tokenizer.sep_token} {item['text_b']}"
-        encoding_b = self.tokenizer(
-            text_b_pair,
-            max_length=self.max_length,
-            padding='max_length',
-            truncation=True,
-            return_tensors='pt'
-        )
-        
         return {
-            'input_ids_a': encoding_a['input_ids'].squeeze(0),
-            'attention_mask_a': encoding_a['attention_mask'].squeeze(0),
-            'input_ids_b': encoding_b['input_ids'].squeeze(0),
-            'attention_mask_b': encoding_b['attention_mask'].squeeze(0),
-            'labels': torch.tensor(item['label'], dtype=torch.long),
-            'anchor_text': item['anchor'],
-            'text_a_raw': item['text_a'],
-            'text_b_raw': item['text_b']
+            'anchor': item['anchor'],
+            'text_a': item['text_a'],
+            'text_b': item['text_b'],
+            'label': item['label']
         }
 
 
@@ -143,139 +149,146 @@ def augment_swap(data: List[Dict], enable: bool) -> List[Dict]:
     return augmented
 
 
-def load_teacher_biencoder(config: dict, device: str):
-    """Load Track B bi-encoder for distillation prior if configured."""
-    if not config['track_a'].get('distill_from_biencoder', False):
-        return None
-    path = config['track_a'].get('teacher_biencoder_path')
-    if path and Path(path).exists():
-        print(f"Loading teacher bi-encoder from {path} for distillation...")
-        return SentenceTransformer(path, device=device)
-    print("Distillation teacher not found; skipping distill regularizer.")
-    return None
+def collate_fn(batch):
+    """Custom collate function to handle text batches."""
+    return {
+        'anchor': [item['anchor'] for item in batch],
+        'text_a': [item['text_a'] for item in batch],
+        'text_b': [item['text_b'] for item in batch],
+        'label': torch.tensor([item['label'] for item in batch], dtype=torch.long)
+    }
 
 
 def train_epoch(
-    model,
+    mlp_head,
+    track_b_model,
     dataloader,
     optimizer,
     scheduler,
     device,
-    use_amp=True,
-    clip_value=1.0,
-    label_smoothing=0.0,
     temperature=1.0,
-    distill_model: SentenceTransformer = None,
     distill_weight: float = 0.0,
-    distill_temperature: float = 1.0
+    distill_temperature: float = 1.0,
+    use_amp=True,
+    clip_value=1.0
 ):
     """
-    Train for one epoch with pairwise scoring.
-    
-    NEW APPROACH: Score (anchor, A) and (anchor, B) separately,
-    then apply softmax cross-entropy loss with temperature scaling.
+    Train for one epoch with MLP head over Track B embeddings.
     
     Args:
-        temperature: Temperature for scaling logits. < 1.0 sharpens distribution (e.g. 0.5-0.7)
+        mlp_head: MLP head model
+        track_b_model: Frozen (or fine-tunable) Track B bi-encoder
+        dataloader: Training data
+        optimizer: Optimizer
+        scheduler: LR scheduler
+        device: Device
+        temperature: Temperature for MLP head scores
+        distill_weight: Weight for distillation from Track B cosine similarities
+        distill_temperature: Temperature for distillation
+        use_amp: Use mixed precision
+        clip_value: Gradient clipping value
     """
-    model.train()
+    mlp_head.train()
     total_loss = 0
     correct = 0
     total = 0
     
     scaler = torch.cuda.amp.GradScaler() if use_amp else None
-    loss_fn = nn.CrossEntropyLoss(label_smoothing=label_smoothing)
-    kl_loss = nn.KLDivLoss(reduction='batchmean') if distill_model and distill_weight > 0 else None
+    loss_fn = nn.CrossEntropyLoss()
+    kl_loss = nn.KLDivLoss(reduction='batchmean') if distill_weight > 0 else None
     
     pbar = tqdm(dataloader, desc="Training")
     for batch in pbar:
-        # Get pairs
-        input_ids_a = batch['input_ids_a'].to(device)
-        attention_mask_a = batch['attention_mask_a'].to(device)
-        input_ids_b = batch['input_ids_b'].to(device)
-        attention_mask_b = batch['attention_mask_b'].to(device)
-        labels = batch['labels'].to(device)
-        anchor_texts = batch['anchor_text']
-        text_a_raw = batch['text_a_raw']
-        text_b_raw = batch['text_b_raw']
+        anchor_texts = batch['anchor']
+        text_a_list = batch['text_a']
+        text_b_list = batch['text_b']
+        labels = batch['label'].to(device)
         
         optimizer.zero_grad()
         
         if use_amp and device.startswith('cuda'):
             with torch.cuda.amp.autocast():
-                # Score pair A: (anchor, text_a)
-                outputs_a = model(
-                    input_ids=input_ids_a,
-                    attention_mask=attention_mask_a
-                )
-                score_a = outputs_a.logits[:, 1]  # Take positive class logit as score
+                # Generate embeddings with Track B (frozen or fine-tunable)
+                with torch.no_grad() if track_b_model.training == False else torch.enable_grad():
+                    anchor_emb = track_b_model.encode(
+                        anchor_texts, convert_to_tensor=True, device=device, show_progress_bar=False
+                    )
+                    a_emb = track_b_model.encode(
+                        text_a_list, convert_to_tensor=True, device=device, show_progress_bar=False
+                    )
+                    b_emb = track_b_model.encode(
+                        text_b_list, convert_to_tensor=True, device=device, show_progress_bar=False
+                    )
                 
-                # Score pair B: (anchor, text_b)
-                outputs_b = model(
-                    input_ids=input_ids_b,
-                    attention_mask=attention_mask_b
-                )
-                score_b = outputs_b.logits[:, 1]  # Take positive class logit as score
+                # Get scores from MLP head
+                score_a = mlp_head(anchor_emb, a_emb)
+                score_b = mlp_head(anchor_emb, b_emb)
                 
-                scores = torch.stack([score_a, score_b], dim=1)
-                scores = scores / temperature
+                # Stack and apply temperature
+                scores = torch.stack([score_a, score_b], dim=1) / temperature
                 targets = (1 - labels).long()
+                
+                # Cross-entropy loss
                 loss = loss_fn(scores, targets)
-                if distill_model and kl_loss:
+                
+                # Distillation from Track B cosine similarities
+                if distill_weight > 0 and kl_loss:
                     with torch.no_grad():
-                        anchor_emb = distill_model.encode(anchor_texts, convert_to_tensor=True, device=device)
-                        a_emb = distill_model.encode(text_a_raw, convert_to_tensor=True, device=device)
-                        b_emb = distill_model.encode(text_b_raw, convert_to_tensor=True, device=device)
                         sim_a = F.cosine_similarity(anchor_emb, a_emb, dim=1)
                         sim_b = F.cosine_similarity(anchor_emb, b_emb, dim=1)
                         teacher_scores = torch.stack([sim_a, sim_b], dim=1) / distill_temperature
                         teacher_probs = F.softmax(teacher_scores, dim=1)
+                    
                     student_log_probs = F.log_softmax(scores / distill_temperature, dim=1)
                     loss = loss + distill_weight * kl_loss(student_log_probs, teacher_probs)
             
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), clip_value)
+            torch.nn.utils.clip_grad_norm_(mlp_head.parameters(), clip_value)
             scaler.step(optimizer)
             scaler.update()
         else:
-            # Score pair A
-            outputs_a = model(
-                input_ids=input_ids_a,
-                attention_mask=attention_mask_a
-            )
-            score_a = outputs_a.logits[:, 1]
+            # Generate embeddings with Track B
+            with torch.no_grad() if track_b_model.training == False else torch.enable_grad():
+                anchor_emb = track_b_model.encode(
+                    anchor_texts, convert_to_tensor=True, device=device, show_progress_bar=False
+                )
+                a_emb = track_b_model.encode(
+                    text_a_list, convert_to_tensor=True, device=device, show_progress_bar=False
+                )
+                b_emb = track_b_model.encode(
+                    text_b_list, convert_to_tensor=True, device=device, show_progress_bar=False
+                )
             
-            # Score pair B
-            outputs_b = model(
-                input_ids=input_ids_b,
-                attention_mask=attention_mask_b
-            )
-            score_b = outputs_b.logits[:, 1]
+            # Get scores from MLP head
+            score_a = mlp_head(anchor_emb, a_emb)
+            score_b = mlp_head(anchor_emb, b_emb)
             
-            scores = torch.stack([score_a, score_b], dim=1)
-            scores = scores / temperature
+            # Stack and apply temperature
+            scores = torch.stack([score_a, score_b], dim=1) / temperature
             targets = (1 - labels).long()
+            
+            # Cross-entropy loss
             loss = loss_fn(scores, targets)
-            if distill_model and kl_loss:
+            
+            # Distillation from Track B cosine similarities
+            if distill_weight > 0 and kl_loss:
                 with torch.no_grad():
-                    anchor_emb = distill_model.encode(anchor_texts, convert_to_tensor=True, device=device)
-                    a_emb = distill_model.encode(text_a_raw, convert_to_tensor=True, device=device)
-                    b_emb = distill_model.encode(text_b_raw, convert_to_tensor=True, device=device)
                     sim_a = F.cosine_similarity(anchor_emb, a_emb, dim=1)
                     sim_b = F.cosine_similarity(anchor_emb, b_emb, dim=1)
                     teacher_scores = torch.stack([sim_a, sim_b], dim=1) / distill_temperature
                     teacher_probs = F.softmax(teacher_scores, dim=1)
+                
                 student_log_probs = F.log_softmax(scores / distill_temperature, dim=1)
                 loss = loss + distill_weight * kl_loss(student_log_probs, teacher_probs)
             
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), clip_value)
+            torch.nn.utils.clip_grad_norm_(mlp_head.parameters(), clip_value)
             optimizer.step()
         
         scheduler.step()
         
-        # Calculate accuracy: argmax over [score_a, score_b]
+        # Calculate accuracy
         predictions = torch.argmax(scores, dim=-1)
         correct += (predictions == targets).sum().item()
         total += labels.size(0)
@@ -289,43 +302,42 @@ def train_epoch(
 
 
 @torch.no_grad()
-def evaluate(model, dataloader, device, label_smoothing=0.0, temperature=1.0):
-    """Evaluate the model with pairwise scoring and temperature scaling."""
-    model.eval()
+def evaluate(mlp_head, track_b_model, dataloader, device, temperature=1.0):
+    """Evaluate the MLP head."""
+    mlp_head.eval()
     total_loss = 0
     correct = 0
     total = 0
     
-    loss_fn = nn.CrossEntropyLoss(label_smoothing=label_smoothing)
+    loss_fn = nn.CrossEntropyLoss()
     
     for batch in tqdm(dataloader, desc="Evaluating"):
-        # Get pairs
-        input_ids_a = batch['input_ids_a'].to(device)
-        attention_mask_a = batch['attention_mask_a'].to(device)
-        input_ids_b = batch['input_ids_b'].to(device)
-        attention_mask_b = batch['attention_mask_b'].to(device)
-        labels = batch['labels'].to(device)
+        anchor_texts = batch['anchor']
+        text_a_list = batch['text_a']
+        text_b_list = batch['text_b']
+        labels = batch['label'].to(device)
         
-        # Score pair A
-        outputs_a = model(
-            input_ids=input_ids_a,
-            attention_mask=attention_mask_a
+        # Generate embeddings with Track B
+        anchor_emb = track_b_model.encode(
+            anchor_texts, convert_to_tensor=True, device=device, show_progress_bar=False
         )
-        score_a = outputs_a.logits[:, 1]
-        
-        # Score pair B
-        outputs_b = model(
-            input_ids=input_ids_b,
-            attention_mask=attention_mask_b
+        a_emb = track_b_model.encode(
+            text_a_list, convert_to_tensor=True, device=device, show_progress_bar=False
         )
-        score_b = outputs_b.logits[:, 1]
+        b_emb = track_b_model.encode(
+            text_b_list, convert_to_tensor=True, device=device, show_progress_bar=False
+        )
         
-        # Compute loss and predictions with temperature scaling
-        scores = torch.stack([score_a, score_b], dim=1)
-        scores = scores / temperature  # Temperature scaling
+        # Get scores from MLP head
+        score_a = mlp_head(anchor_emb, a_emb)
+        score_b = mlp_head(anchor_emb, b_emb)
+        
+        # Stack and apply temperature
+        scores = torch.stack([score_a, score_b], dim=1) / temperature
         targets = (1 - labels).long()
-        loss = loss_fn(scores, targets)
         
+        # Loss and predictions
+        loss = loss_fn(scores, targets)
         predictions = torch.argmax(scores, dim=-1)
         correct += (predictions == targets).sum().item()
         total += labels.size(0)
@@ -343,7 +355,7 @@ def train_single_model(
     fold: int = None
 ) -> Tuple[float, str]:
     """
-    Train a single model (either on full data or one fold).
+    Train a single MLP head model (either on full data or one fold).
     
     Returns:
         (best_val_accuracy, model_save_path)
@@ -353,71 +365,78 @@ def train_single_model(
     # Apply swap augmentation if enabled
     train_data = augment_swap(train_data, config.get('augmentation', {}).get('swap_ab', False))
     
-    # Load tokenizer and model
-    print(f"\nLoading model: {config['track_a']['base_model']}")
-    try:
-        tokenizer = AutoTokenizer.from_pretrained(
-            config['track_a']['base_model'],
-            use_fast=True,
-            trust_remote_code=True
-        )
-    except Exception as e:
-        print(f"Warning: Error loading fast tokenizer: {e}")
-        print("Trying with use_fast=False...")
-        tokenizer = AutoTokenizer.from_pretrained(
-            config['track_a']['base_model'],
-            use_fast=False,
-            trust_remote_code=True
-        )
+    # Load Track B model
+    track_b_path = config['track_a']['track_b_model_path']
+    if not Path(track_b_path).exists():
+        print(f"❌ Track B model not found at: {track_b_path}")
+        print("Please train Track B first!")
+        sys.exit(1)
     
-    model = AutoModelForSequenceClassification.from_pretrained(
-        config['track_a']['base_model'],
-        num_labels=config['track_a']['num_labels'],
-        trust_remote_code=True
+    print(f"\nLoading Track B model: {track_b_path}")
+    track_b_model = SentenceTransformer(track_b_path, device=device)
+    
+    # Freeze or unfreeze Track B
+    freeze_track_b = config['track_a'].get('freeze_track_b', True)
+    if freeze_track_b:
+        print("✓ Freezing Track B (head-only training)")
+        track_b_model.eval()
+        for param in track_b_model.parameters():
+            param.requires_grad = False
+    else:
+        print("⚠️  Track B will be fine-tuned (joint training)")
+        track_b_model.train()
+    
+    # Get embedding dimension from Track B
+    embedding_dim = track_b_model.get_sentence_embedding_dimension()
+    print(f"Track B embedding dimension: {embedding_dim}")
+    
+    # Create MLP head
+    mlp_head = MLPHead(
+        embedding_dim=embedding_dim,
+        hidden_dim=config['track_a']['mlp_hidden_dim'],
+        dropout=config['track_a']['mlp_dropout']
     )
-    # Enable gradient checkpointing to save VRAM
-    if config['track_a'].get('enable_gradient_checkpointing', False):
-        try:
-            model.base_model.gradient_checkpointing_enable()
-            print("Enabled gradient checkpointing for memory savings.")
-        except Exception as e:
-            print(f"Warning: could not enable gradient checkpointing: {e}")
-    # Optionally initialize backbone from Track B
-    maybe_init_from_biencoder(model, config['track_a'].get('teacher_biencoder_path'))
-    model.to(device)
+    mlp_head.to(device)
+    
+    print(f"\nMLP Head architecture:")
+    print(f"  Input: {4 * embedding_dim} (pairwise features)")
+    print(f"  Hidden: {config['track_a']['mlp_hidden_dim']}")
+    print(f"  Output: 1 (score)")
+    print(f"  Dropout: {config['track_a']['mlp_dropout']}")
     
     # Create datasets
-    train_dataset = NarrativeSimilarityDataset(
-        train_data,
-        tokenizer,
-        max_length=config['track_a']['max_length']
-    )
-    val_dataset = NarrativeSimilarityDataset(
-        val_data,
-        tokenizer,
-        max_length=config['track_a']['max_length']
-    )
+    train_dataset = NarrativeSimilarityDataset(train_data)
+    val_dataset = NarrativeSimilarityDataset(val_data)
     
     # Create dataloaders
     train_loader = DataLoader(
         train_dataset,
         batch_size=config['track_a']['batch_size'],
         shuffle=True,
-        num_workers=0
+        num_workers=0,
+        collate_fn=collate_fn
     )
     val_loader = DataLoader(
         val_dataset,
         batch_size=config['track_a']['batch_size'],
         shuffle=False,
-        num_workers=0
+        num_workers=0,
+        collate_fn=collate_fn
     )
     
-    # Setup optimizer and scheduler
-    optimizer = AdamW(
-        model.parameters(),
-        lr=config['track_a']['learning_rate'],
-        weight_decay=config['track_a']['weight_decay']
-    )
+    # Setup optimizer (only for MLP head if Track B is frozen)
+    if freeze_track_b:
+        optimizer = AdamW(
+            mlp_head.parameters(),
+            lr=config['track_a']['learning_rate'],
+            weight_decay=config['track_a']['weight_decay']
+        )
+    else:
+        # Joint training: different LRs for Track B and MLP head
+        optimizer = AdamW([
+            {'params': track_b_model.parameters(), 'lr': config['track_a']['learning_rate'] / 10},
+            {'params': mlp_head.parameters(), 'lr': config['track_a']['learning_rate']}
+        ], weight_decay=config['track_a']['weight_decay'])
     
     total_steps = len(train_loader) * config['track_a']['epochs']
     warmup_steps = int(total_steps * config['track_a']['warmup_ratio'])
@@ -439,34 +458,30 @@ def train_single_model(
     print(f"\nStarting training{' for fold ' + str(fold) if fold is not None else ''}...")
     print(f"Train samples: {len(train_data)}, Val samples: {len(val_data)}")
     
-    # Distillation teacher
-    distill_teacher = load_teacher_biencoder(config, device)
-    
     for epoch in range(config['track_a']['epochs']):
         print(f"\nEpoch {epoch + 1}/{config['track_a']['epochs']}")
         
         # Train
         train_loss, train_acc = train_epoch(
-            model,
+            mlp_head,
+            track_b_model,
             train_loader,
             optimizer,
             scheduler,
             device,
-            use_amp=config['track_a']['mixed_precision'],
-            clip_value=config['track_a']['gradient_clip'],
-            label_smoothing=config['track_a'].get('label_smoothing', 0.0),
             temperature=config['track_a'].get('temperature', 1.0),
-            distill_model=distill_teacher,
             distill_weight=config['track_a'].get('distill_weight', 0.0),
-            distill_temperature=config['track_a'].get('distill_temperature', 1.0)
+            distill_temperature=config['track_a'].get('distill_temperature', 1.0),
+            use_amp=config['track_a']['mixed_precision'],
+            clip_value=config['track_a']['gradient_clip']
         )
         
         # Evaluate
         val_loss, val_acc = evaluate(
-            model, 
-            val_loader, 
+            mlp_head,
+            track_b_model,
+            val_loader,
             device,
-            label_smoothing=config['track_a'].get('label_smoothing', 0.0),
             temperature=config['track_a'].get('temperature', 1.0)
         )
         
@@ -478,8 +493,17 @@ def train_single_model(
             best_val_accuracy = val_acc
             patience_counter = 0
             print(f"New best validation accuracy! Saving model to {model_save_path}")
-            model.save_pretrained(model_save_path)
-            tokenizer.save_pretrained(model_save_path)
+            Path(model_save_path).mkdir(parents=True, exist_ok=True)
+            torch.save(mlp_head.state_dict(), Path(model_save_path) / "mlp_head.pt")
+            # Save config for inference
+            with open(Path(model_save_path) / "config.json", 'w') as f:
+                json.dump({
+                    'embedding_dim': embedding_dim,
+                    'mlp_hidden_dim': config['track_a']['mlp_hidden_dim'],
+                    'mlp_dropout': config['track_a']['mlp_dropout'],
+                    'temperature': config['track_a'].get('temperature', 1.0),
+                    'track_b_model_path': track_b_path
+                }, f, indent=2)
         else:
             patience_counter += 1
             if patience_counter >= patience:
@@ -586,7 +610,7 @@ def main():
         sys.exit(1)
     
     print("="*60)
-    print("TRACK A TRAINING - GOOGLE COLAB")
+    print("TRACK A TRAINING (V2: MLP HEAD) - GOOGLE COLAB")
     print("="*60)
     
     # Setup Colab environment
@@ -609,4 +633,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
