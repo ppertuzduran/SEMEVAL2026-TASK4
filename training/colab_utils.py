@@ -56,6 +56,7 @@ def setup_colab_environment(project_name="narrative_similarity"):
     dirs_to_create = [
         drive_project / "data",
         drive_project / "data/prepared",
+        drive_project / "data/augmented",  # Peer to prepared, not child
         drive_project / "models",
         drive_project / "output"
     ]

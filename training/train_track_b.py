@@ -545,17 +545,18 @@ def main():
     
     # Check if we should use augmented data
     use_augmented = config.get('augmentation', {}).get('use_augmented_data', False)
-    augmented_dir = prepared_dir / "augmented"
     
-    if use_augmented and augmented_dir.exists():
-        data_dir = augmented_dir
-        print(f"\n✓ Using AUGMENTED data from: {data_dir}")
+    if use_augmented:
+        # Augmented data is a peer to prepared, not a child
+        data_dir = prepared_dir.parent / "augmented"
+        if data_dir.exists():
+            print(f"\n✓ Using AUGMENTED data from: {data_dir}")
+        else:
+            print(f"\n⚠️  Augmented data not found at {data_dir}, using original data from: {prepared_dir}")
+            data_dir = prepared_dir
     else:
         data_dir = prepared_dir
-        if use_augmented:
-            print(f"\n⚠️  Augmented data not found, using original data from: {data_dir}")
-        else:
-            print(f"\nLoading data from: {data_dir}")
+        print(f"\nLoading data from: {data_dir}")
     
     print("Loading data...")
     triplets = load_triplets(data_dir / "triplets.jsonl")
@@ -565,7 +566,7 @@ def main():
         cross_encoder_data = [json.loads(line) for line in f]
     
     # Count augmented vs original
-    if use_augmented and data_dir == augmented_dir:
+    if use_augmented and data_dir.name == "augmented":
         n_aug_triplets = sum(1 for t in triplets if t.get('augmented', False))
         n_aug_pairs = sum(1 for p in pairs if p.get('augmented', False))
         n_aug_cross = sum(1 for d in cross_encoder_data if d.get('augmented', False))

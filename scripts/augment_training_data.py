@@ -373,13 +373,17 @@ def main():
         print("\n💻 Running locally")
         config = load_config()
     
-    # Setup paths
+    # Setup paths - augmented data is a peer to prepared, not a child
     prepared_dir = Path(config['data']['prepared_data_dir'])
-    output_dir = prepared_dir / "augmented"
+    
+    # Augmented data goes in data/augmented/, not data/prepared/augmented/
+    data_root = prepared_dir.parent  # Get data/ directory
+    output_dir = data_root / "augmented"
     output_dir.mkdir(parents=True, exist_ok=True)
     
     print(f"\nInput directory: {prepared_dir}")
     print(f"Output directory: {output_dir}")
+    print(f"  (Augmented data is stored as a peer to 'prepared', not inside it)")
     
     # Load data
     print("\nLoading prepared data...")
@@ -453,9 +457,11 @@ def main():
     
     print(f"\n✓ Augmented data saved to: {output_dir}")
     print(f"✓ Review samples in: {output_dir / 'augmentation_samples.txt'}")
-    print(f"\nNext step: Update config.yaml to use augmented data:")
-    print(f"  data:")
-    print(f"    prepared_data_dir: \"{output_dir}\"")
+    print(f"\nNext step: Enable augmented data in config.yaml:")
+    print(f"  augmentation:")
+    print(f"    use_augmented_data: true")
+    print(f"\nThe training script will automatically use data/augmented/ when enabled.")
+
 
 
 if __name__ == "__main__":
