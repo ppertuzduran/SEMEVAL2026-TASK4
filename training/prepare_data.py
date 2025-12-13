@@ -186,19 +186,15 @@ def main():
     
     # Create pairwise dataset for Track B
     print("\nCreating pairwise dataset for Track B...")
-    pairs = create_pairwise_dataset(
-        df, 
-        augment_swap=config['augmentation']['swap_ab']
-    )
+    # Handle both old and new config structure
+    swap_ab = config.get('augmentation', {}).get('swap_ab', True)
+    pairs = create_pairwise_dataset(df, augment_swap=swap_ab)
     save_dataset(pairs, output_dir / "pairs.jsonl")
     print(f"Saved {len(pairs)} pairs")
     
     # Create cross-encoder dataset for Track A
     print("\nCreating cross-encoder dataset for Track A...")
-    cross_encoder_data = create_cross_encoder_dataset(
-        df,
-        augment_swap=config['augmentation']['swap_ab']
-    )
+    cross_encoder_data = create_cross_encoder_dataset(df, augment_swap=swap_ab)
     save_dataset(cross_encoder_data, output_dir / "cross_encoder_data.jsonl")
     print(f"Saved {len(cross_encoder_data)} cross-encoder samples")
     
