@@ -18,6 +18,7 @@ This script implements the v2 approach from APPROACH.md with additional improvem
 import json
 import random
 import sys
+import os
 from pathlib import Path
 import numpy as np
 import torch
@@ -31,6 +32,9 @@ from tqdm import tqdm
 import pandas as pd
 from sentence_transformers.util import cos_sim
 from colab_utils import is_colab, setup_colab_environment, update_config_for_colab, install_colab_dependencies, print_gpu_info
+
+# Disable wandb to avoid login requirement
+os.environ["WANDB_DISABLED"] = "true"
 
 
 def set_seed(seed: int):
@@ -624,8 +628,7 @@ def main():
         evaluator=evaluator,
         output_path=config['track_b']['model_save_path'] + "_temp",
         save_best_model=False,
-        use_amp=config['track_b']['mixed_precision'],
-        report_to="none"
+        use_amp=config['track_b']['mixed_precision']
     )
     
     # Load best model from phase 1
@@ -676,8 +679,7 @@ def main():
             evaluator=evaluator,
             output_path=config['track_b']['model_save_path'] + "_hard",
             save_best_model=False,
-            use_amp=config['track_b']['mixed_precision'],
-            report_to="none"
+            use_amp=config['track_b']['mixed_precision']
         )
         
         model = SentenceTransformer(config['track_b']['model_save_path'], device=device)
