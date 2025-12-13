@@ -149,7 +149,8 @@ def update_config_for_colab(config, colab_paths):
     config['data']['prepared_data_dir'] = colab_paths['prepared_data_dir']
     
     # Update model save paths
-    config['track_a']['model_save_path'] = f"{colab_paths['models_dir']}/track_a_cross_encoder"
+    config['track_a']['model_save_path'] = f"{colab_paths['models_dir']}/track_a_mlp_head"
+    config['track_a']['track_b_model_path'] = f"{colab_paths['models_dir']}/track_b_embedder"  # Track A needs Track B
     config['track_b']['model_save_path'] = f"{colab_paths['models_dir']}/track_b_embedder"
     
     return config
