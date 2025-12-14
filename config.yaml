@@ -46,7 +46,7 @@ track_b:
   temperature_grid: [0.5, 0.7, 0.9, 1.1]  # Temperature values to test
   margin_grid: [0.05, 0.1, 0.2, 0.3]      # Margin values to test
   # SimCSE Consistency Loss (optional)
-  enable_simcse: false     # Set to true for SimCSE loss
+  enable_simcse: true    # Set to true for SimCSE loss
   # Training options
   mixed_precision: true
   gradient_clip: 1.0
@@ -93,7 +93,7 @@ track_a:
 # Data augmentation
 augmentation:
   # Use augmented data for training
-  use_augmented_data: false  # Set to true after running augment_training_data.py
+  use_augmented_data: true  # Set to true after running augment_training_data.py
   
   # Augmentation strategies (for generation via augment_training_data.py)
   strategies:
