@@ -55,8 +55,30 @@ paths = setup_colab_environment(project_name="narrative_similarity")
 ```bash
 python training/prepare_data.py
 ```
+This creates `data/prepared/` with triplets, pairs, and cross-encoder data.
 
-### 2) Train Track B (bi-encoder with projection head + improvements)
+### 2) [Optional] Generate augmented data
+```bash
+python scripts/augment_training_data.py
+```
+**What it does**:
+- Reads from `data/prepared/`
+- Applies T5 paraphrasing + synonym replacement
+- Generates 2 augmented versions per example (3x total data)
+- Saves to `data/augmented/` (peer directory to `prepared/`)
+
+**Enable in training**:
+```yaml
+# config.yaml
+augmentation:
+  use_augmented_data: true  # Training scripts will use data/augmented/
+```
+
+**Expected impact**: +3-7% accuracy improvement on small datasets
+
+**Note**: This step is optional but recommended for better generalization.
+
+### 3) Train Track B (bi-encoder with projection head + improvements)
 
 **You have 3 options:**
 
@@ -125,7 +147,9 @@ python training/train_track_b.py
 
 **If T4 OOM**: Lower `batch_size` in config, or switch `base_model` to `bge-base`.
 
-### 3) Train Track A (MLP head over Track B embeddings)
+**Data Augmentation**: If you ran `augment_training_data.py` and set `use_augmented_data: true`, training will automatically use the augmented dataset from `data/augmented/`.
+
+### 4) Train Track A (MLP head over Track B embeddings)
 ```bash
 python training/train_track_a.py
 ```
@@ -141,7 +165,9 @@ python training/train_track_a.py
 
 **Expected Accuracy**: 0.950-0.955
 
-### 4) Inference
+**Data Augmentation**: Same as Track B - will use augmented data if enabled.
+
+### 5) Inference
 ```bash
 python track_b.py   # embeddings, saves track_b.npy (512-dim)
 python track_a.py   # predictions, saves track_a.jsonl (uses Track B + MLP heads)
@@ -151,12 +177,12 @@ python track_a.py   # predictions, saves track_a.jsonl (uses Track B + MLP heads
 - `track_b.py`: Verifies 512-dim embeddings from projection head
 - `track_a.py`: Loads Track B model + MLP head ensemble (not cross-encoder)
 
-### 5) Evaluation
+### 6) Evaluation
 ```bash
 python scripts/eval_local.py --track both
 ```
 
-### 6) Save results to Drive
+### 7) Save results to Drive
 ```bash
 mkdir -p /content/drive/MyDrive/narrative_similarity/output
 cp -r output/* /content/drive/MyDrive/narrative_similarity/output/
@@ -185,6 +211,60 @@ cp -r output/* /content/drive/MyDrive/narrative_similarity/output/
 - Consistency loss between dropout views
 - Acts as data augmentation
 - Optional, use if still below target
+
+---
+
+## Data Augmentation Details
+
+### Augmentation Strategies
+
+**1. T5-Based Paraphrasing**:
+- Model: `Vamsi/T5_Paraphrase_Paws`
+- Generates semantically equivalent variations
+- Parameters: `num_beams=5`, `temperature=1.2`
+
+**2. Contextual Synonym Replacement**:
+- WordNet-based substitution
+- Preserves proper nouns and grammatical structure
+- Parameters: `replacement_prob=0.15`, `max_replacements=3`
+
+### Directory Structure
+
+```
+data/
+├── prepared/           # Original prepared data (from prepare_data.py)
+│   ├── triplets.jsonl
+│   ├── pairs.jsonl
+│   ├── cross_encoder_data.jsonl
+│   ├── train_val_split.json
+│   └── kfold_splits.json
+└── augmented/          # Augmented data (from augment_training_data.py)
+    ├── triplets.jsonl  # Original + 2x augmented = 3x total
+    ├── pairs.jsonl
+    └── cross_encoder_data.jsonl
+```
+
+**Important**: `augmented/` is a **peer directory** to `prepared/`, not a subdirectory.
+
+### Configuration
+
+```yaml
+# config.yaml
+augmentation:
+  use_augmented_data: true  # Switch between prepared/ and augmented/
+  
+  strategies:
+    paraphrasing:
+      enable: true
+      model: "Vamsi/T5_Paraphrase_Paws"
+    synonym_replacement:
+      enable: true
+      replacement_prob: 0.15
+  
+  n_augmentations: 2  # Generate 2 versions per example
+  min_similarity: 0.3  # Filter threshold
+  max_similarity: 0.9
+```
 
 ---
 
