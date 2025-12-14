@@ -27,7 +27,7 @@ track_b:
     pairwise: 0.5          # PairwiseSoftmaxLoss weight
     mnr: 0.5               # MultipleNegativesRankingLoss weight
     simcse: 0.0            # SimCSE consistency loss weight (optional, enabled by experiments)
-  margin: 0.2              # Margin for MarginRankingLoss
+  margin: 0.05              # Margin for MarginRankingLoss
   # Training hyperparameters
   batch_size: 4            # Reduced for composite loss (more memory intensive)
   epochs: 4                # Unified training phase
@@ -35,10 +35,10 @@ track_b:
   warmup_steps: 500
   weight_decay: 0.01       # Weight decay for backbone
   projection_weight_decay: 0.05  # Projection head weight decay (tuned via experiments)
-  temperature: 0.7         # Sharper softmax per APPROACH
+  temperature: 0.5         # Sharper softmax per APPROACH
   max_seq_length: 384      # shorten sequences to save VRAM on T4
   # Hard Negative Mining (tuned via experiments)
-  enable_hard_negatives: false  # Set to true or let experiments decide
+  enable_hard_negatives: true  # Set to true or let experiments decide
   hard_negative_k: 5            # Number of hard negatives per anchor (grid: 3, 5, 7)
   hard_negative_epochs: 2       # Extra epochs on hard negatives (grid: 1, 2)
   # Hyperparameter Sweep (recommended)
