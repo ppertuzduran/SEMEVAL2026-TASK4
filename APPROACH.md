@@ -1,539 +1,411 @@
-# Next-Gen Approach for Narrative Similarity (Tracks A & B)
+# APPROACH v10 – Focused Improvements for Tracks A & B
 
-This document describes a **v2 approach** to improve both Track A and Track B beyond the current
-~0.89 (Track A) and ~0.94 (Track B) accuracy levels. The goal is to:
+This version of the approach document focuses on **what to change going forward**, not on restating the whole existing pipeline.
 
-- Push **Track B** closer to the theoretical ceiling by making the bi-encoder the primary model,
-  trained with stronger supervision and regularization.
-- Make **Track A** a *lightweight interaction head* on top of Track B, instead of a full
-  cross-encoder that is currently more prone to overfitting.
-- Keep the implementation compatible with the existing `train_track_a.py`, `train_track_b.py`,
-  `track_a.py`, and `track_b.py` structure, so changes are incremental rather than a full rewrite.
+You already have:
 
----
+- Track B: a strong bi‑encoder (BGE‑large) with a projection head and composite loss.
+- Track A: a lightweight MLP head on top of Track B embeddings.
+- One experiment runner: `run_track_b_experiments.py`.
 
-## 1. Current System: Short Diagnostic
-
-### 1.1 What we have now
-
-From the existing implementation and logs:
-
-- **Track B**
-  - Backbone: `BAAI/bge-large-en-v1.5` SentenceTransformer.
-  - Multi-phase training:
-    - Phase 1: MultipleNegativesRankingLoss on (anchor, positive) pairs.
-    - Phase 2: custom PairwiseSoftmaxLoss on (anchor, A, B) triples.
-    - Phase 3: TripletLoss on (anchor, positive, negative).
-  - Optional Phase 4: Distillation from the Track A cross-encoder ensemble.
-  - Model selection is driven by accuracy on the Track A dev triples (cosine-based).
-
-- **Track A**
-  - Backbone: `BAAI/bge-large-en-v1.5` loaded as `AutoModelForSequenceClassification`.
-  - Pairwise scoring cross-encoder:
-    - Score (anchor, A) and (anchor, B) separately using the positive class logit.
-    - Apply temperature scaling and softmax over `[score_a, score_b]`.
-  - Uses 5-fold cross-validation + ensemble (average logits).
-  - Regularized with **B→A distillation** from the Track B bi-encoder.
-  - Achieves ~0.93 cross-val accuracy but ~0.89 actual inference accuracy on dev.
-
-### 1.2 Observed gap
-
-- **Track B (bi-encoder) already outperforms Track A** on the evaluation metric
-  even though Track A is a more expressive model.
-- This is a strong signal that:
-  - The **bi-encoder is well-aligned** to the triple-wise metric.
-  - The **cross-encoder is slightly overfitting**, despite k-fold and distillation,
-    and is not delivering extra value over the bi-encoder in terms of generalization.
-
-This motivates a v2 design where **Track B is the primary model**, and **Track A becomes a thin
-reranking / interaction head on top of Track B embeddings**, rather than a fully independent model.
+The goal of v10 is to:
+1. Turn Track B into a **properly tuned metric learner** via systematic hyperparameter sweeps.
+2. Give Track A its **own experiment runner** with sensible search spaces.
+3. Make `README.md` explicit about **how to run sweeps** and **where to change ranges** for non‑experts.
 
 ---
 
-## 2. High-Level v2 Strategy
+## 1. Design Goals
 
-1. **Elevate Track B to the main narrative similarity model**:
-   - Keep the current 3-phase training, but strengthen metric alignment and regularization.
-   - Introduce harder negatives and better supervision on the triple-level decision.
-
-2. **Redesign Track A as a lightweight “interaction head” over Track B embeddings**:
-   - Replace the heavy cross-encoder with a small MLP that operates on frozen (or lightly
-     fine-tuned) Track B embeddings.
-   - Directly optimize a ranking-style loss on (anchor, A, B) using the embedding features.
-
-3. **Late fusion between B and A at inference**:
-   - Use Track B cosine similarities *and* the Track A head scores as features in a simple
-     calibration layer (e.g., logistic regression) learned on the dev triples.
-
-This setup is more data-efficient (tiny labeled dataset) and enforces **full consistency between
-Track A and Track B**, since both are built over the same embedding space.
+- **Respect the competition rules**: Track B must produce embeddings story‑by‑story; Track A must operate on triples.
+- **Exploit what you already built**: keep the current architecture; optimize the hyperparameters.
+- **Stay Colab‑friendly**: small, discrete search spaces instead of giant Bayesian optimization.
 
 ---
 
-## 3. Improved Track B: Stronger, More Regularized Bi-Encoder
+## 2. Track B – Embedding Model
 
-### 3.1 Backbone and embedding dimension
+### 2.1 Training skeleton (kept as‑is)
 
-- Keep using `BAAI/bge-large-en-v1.5` as backbone (already strong and compatible).
-- Consider **reducing the embedding dimension** via an additional linear projection head
-  to **512 dimensions**:
-  - Add a linear layer on top of the BGE embedding: `W ∈ R^{512×1024}` + LayerNorm.
-  - This reduces capacity and can **improve generalization** on small datasets.
-  - Track rules allow any dimension between 10 and 8192, so 512 is legal.
+We keep the existing training logic in `train_track_b.py`:
 
-In practice:
+- Base model: `BAAI/bge-large-en-v1.5`.
+- Projection head: linear (1024 → projection_dim) + normalization.
+- Losses: MultipleNegativesRankingLoss + CompositeLoss (margin ranking + pairwise softmax).
+- Optional phases: hard negative mining, SimCSE‑style consistency loss, temperature/margin sweep.
 
-- Modify the SentenceTransformer setup to include a final `Dense` layer with output dim 512.
-- Keep L2 normalization after the projection.
+We **do not** change the core trainer in v10. All changes are about **how we call it**.
 
-### 3.2 Loss design: move to a unified, metric-aligned loss
+### 2.2 Make `run_track_b_experiments.py` the main entry point
 
-The current curriculum is strong, but we can simplify and better align with the evaluation metric.
+From v10 on, **Track B is not trained directly with `train_track_b.py` anymore** in normal usage. Instead:
 
-**New composite loss for Track B**:
+- Users call:
 
-For each triple (anchor, A, B) with label 1 if A is closer, 0 if B is closer:
+  ```bash
+  python scripts/run_track_b_experiments.py
+  ```
 
-1. Encode: `e_anchor, e_a, e_b` (normalized).
-2. Compute cosine similarities: `s_a = cos(e_anchor, e_a)`, `s_b = cos(e_anchor, e_b)`.
-3. Define **margin ranking loss**:
-   - Let `y = +1` if A is closer, `y = -1` if B is closer.
-   - Use `MarginRankingLoss` on `(s_a, s_b, y)` with margin `m` (e.g., 0.2).
-4. Add **pairwise softmax classification loss** on scores `[s_a, s_b]` with temperature τ:
-   - This is similar to your current PairwiseSoftmaxLoss, but you combine it with the margin loss.
+- That script:
+  - Backs up `config.yaml` → `config.yaml.backup`.
+  - Runs a baseline training with current settings.
+  - Runs several incremental experiments, each mutating a *small set* of hyperparameters.
+  - Only keeps an experiment if validation accuracy improves.
+  - Writes all results to `experiments_track_b.json`.
+  - Updates `config.yaml` with the best‑performing configuration.
 
-Overall:
+This gives you **reproducible, logged model selection** without touching the trainer.
 
-```text
-L_total = L_rank_margin + α * L_pairwise_softmax + β * L_MNR + γ * L_simcse
+### 2.3 Track B hyperparameters to search
+
+We expose a **compact, hand‑picked search space** via `config.yaml` and `run_track_b_experiments.py`.
+
+#### 2.3.1 `config.yaml` ranges (Track B section)
+
+Add/adjust the following under `track_b` in `config.yaml`:
+
+```yaml
+track_b:
+  # Projection & regularization
+  projection_dim: 512        # optionally test 384 vs 512 via experiments
+  weight_decay: 0.01         # backbone weight decay
+  projection_weight_decay: 0.05   # tuned via experiments
+
+  # Loss weights
+  loss_weights:
+    margin:   1.0            # margin ranking loss weight
+    pairwise: 0.5            # pairwise softmax loss weight
+    mnr:      0.5            # MultipleNegativesRankingLoss weight
+    simcse:   0.0            # 0 by default; only enabled by experiments
+
+  # Temperature × margin sweep (used when enable_hyperparam_sweep: true)
+  temperature_grid: [0.5, 0.7, 0.9, 1.1]
+  margin_grid:      [0.05, 0.1, 0.2, 0.3]
+
+  # Hard negative mining defaults (can be overridden by experiments)
+  hard_negative_k:      5
+  hard_negative_epochs: 2
+
+  # Training schedule (example values)
+  epochs: 4
+  batch_size: 16
+  learning_rate: 2e-5
 ```
 
-Where:
+These are baseline values; the sweeps below decide which ones to keep.
 
-- `L_rank_margin`: `MarginRankingLoss` on (s_a, s_b).
-- `L_pairwise_softmax`: cross-entropy over `[s_a, s_b]` with temperature `τ ≈ 0.7`.
-- `L_MNR`: MultipleNegativesRankingLoss on (anchor, positive) pairs, as you already use.
-- `L_simcse`: optional SimCSE-style **consistency loss** where you apply two different
-  dropout/noise views to the same story and maximize agreement between embeddings.
+#### 2.3.2 Experiment 1 – Regularization sweep
 
-Suggested coefficients (to tune coarsely on dev):
-
-- α = 0.5
-- β = 0.5
-- γ = 0.1
-
-### 3.3 Hard negative mining
-
-With only 200 triples, a lot of the generalization comes from **how negatives are chosen**.
-
-Add a simple **offline hard-negative mining** step:
-
-1. After an initial training pass (e.g., after the current Phase 2),
-   encode all stories with Track B.
-2. For each anchor A_i, retrieve its **K nearest neighbors** (by cosine) from the pool
-   of *non-positive* candidates.
-3. Build new triples where:
-   - Positive = known closer story.
-   - Negative = one of these **top-K nearest but incorrect** candidates.
-
-Use these mined triples in an extra “Phase HN” with the composite loss above. This focuses
-the model on the hardest distinctions and often adds +1–2% accuracy on small ranking datasets.
-
-### 3.4 Regularization and small-data strategies
-
-To avoid overfitting:
-
-- Use **weight decay ~0.05–0.1** for the new projection head, slightly lower (0.01) for the
-  backbone.
-- Add **dropout 0.1–0.2** in the projection head.
-- Keep `max_seq_length` at 384; do not increase beyond that to avoid noise from long tails.
-- Enable gradient checkpointing (already done) and mixed precision (already done).
-
-### 3.5 Model selection for Track B
-
-Instead of relying only on intermediate evaluation during `fit`, add a final **hyperparameter
-sweep (small grid)** on:
-
-- Temperature τ ∈ {0.5, 0.7, 1.0}
-- Margin m ∈ {0.1, 0.2, 0.3}
-
-For each checkpoint, recompute the triple-wise accuracy on dev using cosine similarity, and pick
-the best combination. Since dev is tiny, this is very cheap and can yield +0.5–1% accuracy.
-
----
-
-## 4. Data Augmentation: Offline Semantic Preservation
-
-With only ~200 training examples, **data augmentation** is critical for generalization. The implementation uses two complementary offline augmentation strategies that preserve semantic meaning while introducing variation.
-
-### 4.1 Augmentation Strategies
-
-**1. T5-Based Paraphrasing**:
-- Uses `Vamsi/T5_Paraphrase_Paws` model fine-tuned for paraphrasing
-- Generates semantically equivalent variations via beam search
-- Parameters:
-  - `num_beams=5`: Multiple candidate paraphrases
-  - `temperature=1.2`: Moderate diversity
-  - `top_k=50, top_p=0.95`: Nucleus sampling for quality
-
-**2. Contextual Synonym Replacement**:
-- WordNet-based synonym substitution
-- Preserves grammatical structure and proper nouns
-- Parameters:
-  - `replacement_prob=0.15`: Replace ~15% of words
-  - `max_replacements=3`: Limit changes per text
-  - POS-aware: Only replaces words with same part-of-speech
-
-### 4.2 Augmentation Pipeline
-
-The `AugmentationPipeline` in `utils/data_augmentation.py` orchestrates both strategies:
+At the top of `scripts/run_track_b_experiments.py`, define the regularization search space:
 
 ```python
-pipeline = AugmentationPipeline(
-    paraphrase_augmenter=ParaphraseAugmenter(...),
-    synonym_augmenter=SynonymAugmenter(...),
-    strategy='random'  # Randomly pick one augmenter per augmentation
-)
+REG_DROPOUTS = [0.0, 0.1, 0.2]
+REG_WEIGHT_DECAYS = [0.03, 0.06, 0.1]
 ```
 
-### 4.3 Augmentation Workflow
+Then, in the section currently labeled **“Experiment 2: + Better Regularization”**, replace the single hard‑coded setting with a loop:
 
-1. **Generate augmented data** (offline):
-   ```bash
-   python scripts/augment_training_data.py
-   ```
-   - Reads from `data/prepared/`
-   - Generates `n_augmentations=2` versions per example (3x total data)
-   - Filters by similarity: `min_similarity=0.3`, `max_similarity=0.9`
-   - Saves to `data/augmented/` (peer directory to `prepared/`)
+```python
+best_reg_result = None
 
-2. **Enable in training**:
-   ```yaml
-   # config.yaml
-   augmentation:
-     use_augmented_data: true
-   ```
+for d in REG_DROPOUTS:
+    for wd in REG_WEIGHT_DECAYS:
+        cfg = load_config(backup_path)
+        cfg['track_b']['projection_dropout'] = d
+        cfg['track_b']['projection_weight_decay'] = wd
 
-3. **Training scripts automatically use augmented data**:
-   - `train_track_b.py` and `train_track_a.py` check `use_augmented_data` flag
-   - Load from `data/augmented/` instead of `data/prepared/`
-   - Track augmentation statistics (original vs augmented counts)
+        result = run_experiment(f'+ Reg (drop={d}, wd={wd})', cfg, config_path)
 
-### 4.4 Expected Impact
-
-According to SimCSE and SBERT literature, offline augmentation on small datasets typically yields:
-- **+3-7% absolute accuracy** improvement
-- Better generalization to unseen narrative variations
-- Reduced overfitting on small training sets
-
-### 4.5 Data Directory Structure
-
-```
-data/
-├── prepared/           # Original prepared data
-│   ├── triplets.jsonl
-│   ├── pairs.jsonl
-│   └── cross_encoder_data.jsonl
-└── augmented/          # Augmented data (peer to prepared)
-    ├── triplets.jsonl  # Original + augmented
-    ├── pairs.jsonl
-    └── cross_encoder_data.jsonl
+        if best_reg_result is None or result['accuracy'] > best_reg_result['accuracy']:
+            best_reg_result = result
+            base_config = cfg
+            baseline_accuracy = result['accuracy']
 ```
 
-**Note**: Augmented data is a **peer directory** to `prepared/`, not a subdirectory.
+This turns regularization into a **small grid search** over dropout and projection‑head weight decay.
+
+#### 2.3.3 Experiment 2 – Temperature × margin sweep
+
+No structural changes needed; we just rely on the `temperature_grid` and `margin_grid` from `config.yaml`.
+
+- `run_track_b_experiments.py` sets `enable_hyperparam_sweep: true` in a temporary config.
+- `train_track_b.py` runs through all temperature/margin combinations and writes the best ones into `best_hyperparams.json` and your logs.
+- The experiment script reads the final accuracy and decides whether to keep it.
+
+If you want to tweak the range, you only touch `config.yaml` (not the trainer).
+
+#### 2.3.4 Experiment 3 – Hard negative mining sweep (optional)
+
+At the top of `run_track_b_experiments.py` add:
+
+```python
+HARD_K      = [3, 5, 7]
+HARD_EPOCHS = [1, 2]
+```
+
+Then, instead of a single `(k=5, epochs=2)` in the “Hard Negatives” experiment, loop:
+
+```python
+best_hard_result = None
+
+for k in HARD_K:
+    for e in HARD_EPOCHS:
+        cfg = load_config(backup_path)
+        cfg['track_b']['enable_hard_negatives'] = True
+        cfg['track_b']['hard_negative_k'] = k
+        cfg['track_b']['hard_negative_epochs'] = e
+
+        result = run_experiment(f'+ HardNeg (k={k}, e={e})', cfg, config_path)
+
+        if best_hard_result is None or result['accuracy'] > best_hard_result['accuracy']:
+            best_hard_result = result
+            base_config = cfg
+            baseline_accuracy = result['accuracy']
+```
+
+Again, the trainer is unchanged; we just vary the config around it.
+
+#### 2.3.5 Experiment 4 – SimCSE toggle
+
+Leave SimCSE as a final, optional regularization:
+
+- Baseline: `simcse_weight = 0.0` (off).
+- Experiment: set `simcse_weight` to something small, e.g. `0.1` in `config.yaml` or directly in the experiment script.
+
+Only keep it if it improves dev accuracy.
 
 ---
 
-## 5. New Track A: Lightweight Head over Track B Embeddings
+## 3. Track A – Triple Classification Model
 
-Instead of a full cross-encoder that reprocesses text, we build **Track A directly on top of Track B**.
+For Track A, the main idea in v10 is the same: **do not redesign the trainer**, but **add an experiment runner** and standardize the search space.
 
-### 4.1 Architecture
+### 3.1 Keep the model architecture
 
-Given Track B embeddings `e_anchor, e_a, e_b` (dim 512 after projection):
+We keep:
 
-1. Construct **pairwise features** for A and B:
+- Track B as the encoder (usually loaded frozen).
+- A single MLP head operating on concatenations of `(anchor, candidate)` embeddings:
+  - `φ(x) = [ e_anchor, e_x, |e_anchor - e_x|, e_anchor ⊙ e_x ]`.
+  - MLP: `4d → hidden_dim → 1` with GELU and dropout.
+- Optional distillation from Track B’s cosine‑based decision via `distill_weight` and `distill_temperature`.
 
-```text
-φ(a) = [e_anchor, e_a, |e_anchor - e_a|, e_anchor ⊙ e_a]  ∈ R^{4d}
-φ(b) = [e_anchor, e_b, |e_anchor - e_b|, e_anchor ⊙ e_b]
+No architecture change in v10; only hyperparameters.
+
+### 3.2 New script: `run_track_a_experiments.py`
+
+Create a new script (e.g. in `scripts/run_track_a_experiments.py`) mirroring the Track B runner:
+
+- Backs up `config.yaml` → `config.yaml.backup`.
+- Runs a baseline training using `training/train_track_a.py`.
+- Applies several incremental improvements (different hyperparameter combinations).
+- Keeps only configurations that improve dev accuracy.
+- Saves all results to `experiments_track_a.json`.
+- Writes the best configuration back to `config.yaml`.
+
+#### 3.2.1 Hyperparameter ranges for Track A
+
+Define ranges at the top of `run_track_a_experiments.py`:
+
+```python
+HIDDEN_DIMS     = [512, 1024]
+DROPOUTS        = [0.1, 0.2, 0.3]
+LEARNING_RATES  = [5e-5, 1e-4, 2e-4]
+DISTILL_WEIGHTS = [0.0, 0.3, 0.5]
+FREEZE_OPTIONS  = [True, False]  # unfreeze only with lower LR / fewer epochs
 ```
 
-2. Pass each φ through a **small 2-layer MLP**:
+This keeps the search space small and easy to modify.
 
-```text
-h_a = MLP(φ(a))  → scalar score s_a
-h_b = MLP(φ(b))  → scalar score s_b
+#### 3.2.2 Suggested experiment schedule
+
+**Step 0 – Baseline**  
+Use the existing `track_a` config as baseline. Run `train_track_a.py`, parse the validation accuracy from logs (e.g. last “validation accuracy” line), and store it.
+
+**Step 1 – Distillation sweep**  
+For each `distill_weight` in `DISTILL_WEIGHTS` (and a fixed `distill_temperature`, e.g. 2.0):
+
+- Clone the baseline config.
+- Set `track_a.distill_weight` and `track_a.distill_temperature`.
+- Train and record accuracy.
+- Keep the best setting (if it beats baseline).
+
+**Step 2 – Head size × dropout sweep**  
+For the best distillation config:
+
+- Loop over `HIDDEN_DIMS × DROPOUTS`.
+- Set `track_a.mlp_hidden_dim` and `track_a.mlp_dropout`.
+- Train and record accuracy.
+- Keep the best pair.
+
+**Step 3 – Learning rate sweep**  
+For the best head config:
+
+- Loop over `LEARNING_RATES`.
+- Set `track_a.learning_rate`.
+- Train and record accuracy.
+- Keep the best one.
+
+**Step 4 – Light joint fine‑tuning (optional)**  
+
+Only if you want to test slight improvements and you’re not overfitting:
+
+- For the best config so far:
+  - Set `track_a.freeze_track_b: False`.
+  - Set a **small LR** for encoder parameters (e.g. via a second param group in `train_track_a.py`, or by lowering global LR in config to `2e-5` and updating param‑group logic in the trainer).
+  - Reduce `track_a.epochs` (e.g. to `3`).
+- Train and keep the unfreezed variant only if validation accuracy improves.
+
+This gives you a controlled way to see if letting Track A fine‑tune the encoder helps, without making it the default.
+
+### 3.3 Recommended default values in `config.yaml` (Track A)
+
+Under `track_a` in `config.yaml`, set reasonable starting values:
+
+```yaml
+track_a:
+  mlp_hidden_dim:      512
+  mlp_dropout:         0.2
+  learning_rate:       1e-4
+  distill_weight:      0.3
+  distill_temperature: 2.0
+  freeze_track_b:      true
+  epochs:              5
+  batch_size:          16
 ```
 
-MLP example:
-
-- Layer 1: Linear(4d → 2d) + GELU + Dropout(0.2)
-- Layer 2: Linear(2d → 1)
-
-3. Track A prediction uses the same **pairwise softmax** as now:
-
-```text
-scores = [s_a, s_b] / τ_a
-p = softmax(scores)
-```
-
-This is analogous to your current pairwise cross-encoder, but the heavy transformer is replaced
-by one forward pass of Track B plus a tiny MLP. The **model capacity is much smaller**, which is
-ideal for a 200-example dataset.
-
-### 4.2 Training objective for Track A head
-
-For each triple (anchor, A, B, label):
-
-- Use **cross-entropy loss** on `[s_a, s_b]` (label in {0,1} as “A closer?”).
-- Add **distillation from the current Track B** decision, but now in the opposite direction:
-  - Teacher scores: `[cos(e_anchor, e_a) / τ_b, cos(e_anchor, e_b) / τ_b]`.
-  - Student scores: `[s_a / τ_b, s_b / τ_b]`.
-  - KL divergence between teacher softmax and student softmax.
-
-Total loss:
-
-```text
-L_A = L_ce + λ_distill * KL(softmax_b || softmax_head)
-```
-
-Suggested λ_distill ≈ 0.3.
-
-### 4.3 Fine-tuning strategy
-
-Two modes:
-
-1. **Head-only training (recommended first)**:
-   - Freeze all Track B parameters.
-   - Train only the MLP head on top of frozen embeddings.
-   - This greatly reduces overfitting risk and training instability.
-
-2. **Light joint fine-tuning (optional second stage)**:
-   - Unfreeze the last 2–4 transformer layers of Track B + projection head.
-   - Apply a **much smaller learning rate** (e.g., 1e-6) to those layers, 1e-4 to the MLP head.
-   - Train for 1–2 more epochs with strong weight decay and early stopping on dev.
-
-Because the head is tiny, you can still use **5-fold cross-validation** for robustness and then
-ensemble the heads (average scores).
-
-### 4.4 Inference for Track A
-
-Given a triple (anchor, A, B):
-
-1. Encode `anchor`, `A`, `B` once with Track B → get embeddings.
-2. Construct φ(a), φ(b), run through the MLP head(s).
-3. For an ensemble of heads:
-   - Average `[s_a, s_b]` over heads, then apply temperature scaling and compare.
-
-Compute accuracy exactly as the competition expects. This approach is fully compliant with Track A
-because the decision is still made directly from the triple; the fact that embeddings come from
-Track B is internal to the system.
+These will be the starting point for `run_track_a_experiments.py` and will be overwritten by the best‑performing combination.
 
 ---
 
-## 5. Joint Calibration & Late Fusion
+## 4. README.md Updates (Hyperparameter Sweeps)
 
-Once you have a strong Track B and a calibrated Track A head, you can combine them at inference.
+Below is a **ready‑to‑paste** section for `README.md` so non‑experts can run the sweeps and tweak ranges.
 
-For each triple:
+### 4.1 Section to add to README.md
 
-- Feature 1: Δ_cos = cos(e_anchor, e_a) − cos(e_anchor, e_b).
-- Feature 2: Δ_head = s_a − s_b.
+```markdown
+## Hyperparameter Sweeps
 
-Use the dev triples to fit a **tiny logistic regression or even a 1D threshold** on the pair
-(Δ_cos, Δ_head):
-
-```text
-P(A closer) = σ(w1 * Δ_cos + w2 * Δ_head + b)
-```
-
-Then, at inference, you use this calibrated probability to choose A or B.
-
-Because this “meta-model” has only 2–3 parameters, it is very robust even with 200 samples, and it
-lets you **trust the bi-encoder more when it is confident**, and the head more when the cross-
-feature agrees. In practice this often gives another +0.5–1.5% absolute accuracy.
-
-This late-fusion layer is purely post-processing on scores and does **not** violate any Track A or
-Track B constraints.
+This project includes simple scripts to run **hyperparameter sweeps** for both tracks.
+They are designed so you can try a few configurations without touching the training code.
 
 ---
 
-## 6. Automated Experiment Runner
+### Track B – Embedding Model
 
-The implementation includes `scripts/run_track_b_experiments.py` for **automated incremental testing** of improvements.
-
-### 6.1 Experiment Strategy
-
-The script tests improvements incrementally:
-1. **Baseline**: Current configuration
-2. **+ Regularization**: Better projection weight decay
-3. **+ Hyperparameter Sweep**: Optimal temperature × margin
-4. **+ Hard Negative Mining**: Difficult examples
-5. **+ SimCSE**: Consistency loss (if still below target)
-
-**Key Features**:
-- Keeps improvements that work, reverts those that don't
-- Fully automated (no manual intervention)
-- Saves results to `experiments_track_b.json`
-- Backs up original config
-
-### 6.2 Usage
+Use `scripts/run_track_b_experiments.py` to search for better hyperparameters for the
+embedding (Track B) model.
 
 ```bash
 python scripts/run_track_b_experiments.py
 ```
 
-**Expected Output**:
-```
-EXPERIMENT SUMMARY
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Experiment                     Accuracy     Delta      Status
-──────────────────────────────────────────────────────────────────
-Baseline                       0.9400       +0.0000    ✓
-+ Regularization               0.9430       +0.0030    ✓
-+ Hyperparam Sweep             0.9460       +0.0060    ✓
-+ Hard Negatives               0.9520       +0.0120    ✓
+What this script does:
 
-FINAL BEST ACCURACY: 0.9520
-```
+1. Backs up your current `config.yaml` to `config.yaml.backup`.
+2. Trains a **baseline** model with the current settings.
+3. Tries several incremental improvements:
+   - Different projection dropout and projection‑head weight decay.
+   - Temperature × margin sweep for the pairwise loss.
+   - Hard negative mining settings.
+   - Optional SimCSE regularization.
+4. Only keeps experiments that improve validation accuracy.
+5. Saves all results in `experiments_track_b.json`.
+6. Writes the best‑performing configuration back into `config.yaml`.
 
-### 6.3 Results Analysis
+**Where to change ranges**
 
-**experiments_track_b.json**:
-```json
-{
-  "experiments": [
-    {"name": "Baseline", "accuracy": 0.940, "status": "success"},
-    {"name": "+ Regularization", "accuracy": 0.943, "status": "success"},
-    {"name": "+ Hyperparam Sweep", "accuracy": 0.946, "status": "success"},
-    {"name": "+ Hard Negatives", "accuracy": 0.952, "status": "success"}
-  ],
-  "best_config": {...},
-  "final_accuracy": 0.952
-}
-```
+- Temperature and margin grids are defined in `config.yaml` under `track_b`:
 
----
-
-## 7. Practical Implementation Notes
-
-### 7.1 Track B Implementation Details (train_track_b.py)
-
-**Projection head**:
-- Implemented via `add_projection_head()` function
-- Uses `models.Dense` from SentenceTransformers for compatibility
-- Projects from 1024 → 512 dimensions + LayerNorm + L2 Normalize
-- **Dropout handling**: Projection dropout is managed via `projection_weight_decay` for serialization stability
-  - Note: Explicit dropout layers cause SentenceTransformer serialization issues
-  - Weight decay provides equivalent regularization without serialization problems
-
-**Unified loss**:
-- Implemented as `CompositeLoss` class combining:
-  - `MarginRankingLossCustom`: Metric-aligned ranking
-  - `PairwiseSoftmaxLoss`: Temperature-scaled classification
-  - Weights controlled via `config.yaml` (`loss_weights.margin`, `loss_weights.pairwise`)
-- MNR loss added separately via `train_objectives` list
-
-**Hard negative mining**:
-- Implemented as `mine_hard_negatives()` function
-- Runs as optional Phase 2 if `enable_hard_negatives: true`
-- Mines K nearest neighbors that are NOT the correct positive
-- Trains on mined triplets with `TripletLoss` for focused discrimination
-
-**Hyperparameter sweep**:
-- Implemented as `hyperparameter_sweep()` function
-- Runs as optional Phase 3 if `enable_hyperparam_sweep: true`
-- Tests all combinations of `temperature_grid × margin_grid`
-- Saves best hyperparameters to `best_hyperparams.json`
-
-**SimCSE**:
-- Implemented as `SimCSELoss` class
-- **Status**: Optional, not integrated into composite loss by default
-- Enable via `enable_simcse: true` (currently experimental)
-- Applies consistency loss between different dropout views
-
-### 7.2 Track A Implementation Details (train_track_a.py)
-
-**MLP Head Architecture**:
-- Implemented as `MLPHead` class (not cross-encoder)
-- Consumes Track B embeddings (frozen or fine-tunable)
-- Pairwise feature construction:
-  ```python
-  φ(a) = [e_anchor, e_a, |e_anchor - e_a|, e_anchor ⊙ e_a]  # 4d features
+  ```yaml
+  track_b:
+    temperature_grid: [0.5, 0.7, 0.9, 1.1]
+    margin_grid:      [0.05, 0.1, 0.2, 0.3]
   ```
-- MLP: `Linear(4d → 2d) + GELU + Dropout(0.2) + Linear(2d → 1)`
 
-**Training Modes**:
-1. **Head-only** (default, `freeze_track_b: true`):
-   - Track B parameters frozen
-   - Only MLP head trained
-   - Prevents overfitting on small dataset
-2. **Joint fine-tuning** (optional, `freeze_track_b: false`):
-   - Track B fine-tuned with lower LR (1/10 of head LR)
-   - Higher overfitting risk
+- Regularization ranges (projection dropout and projection weight decay) are defined as Python
+  lists at the top of `scripts/run_track_b_experiments.py`:
 
-**Dataset**:
-- `NarrativeSimilarityDataset` returns raw texts (not tokenized)
-- Track B encoding happens inside training loop
-- Optional swap augmentation: `augment_swap()` duplicates with A/B swapped
+  ```python
+  REG_DROPOUTS = [0.0, 0.1, 0.2]
+  REG_WEIGHT_DECAYS = [0.03, 0.06, 0.1]
+  ```
 
-**K-Fold Cross-Validation**:
-- Implemented via `train_with_kfold()` function
-- Uses pre-computed splits from `prepare_data.py`
-- Trains ensemble of heads (one per fold)
-- Results saved to `kfold_results.json`
+  To try more or fewer values, just edit these lists.
 
-**Distillation**:
-- KL divergence from Track B cosine similarities (teacher)
-- Weight controlled via `distill_weight` (default: 0.3)
-- Helps align MLP head with Track B's metric space
+- Hard negative settings are also controlled in `scripts/run_track_b_experiments.py`:
 
-### 7.3 Inference Scripts
+  ```python
+  HARD_K      = [3, 5, 7]
+  HARD_EPOCHS = [1, 2]
+  ```
 
-**Track B (track_b.py)**:
-- Loads trained bi-encoder with projection head
-- Encodes all stories to 512-dim embeddings
-- Saves to `track_b.npy`
-- Verifies embedding dimension matches expected (512)
-
-**Track A (track_a.py)**:
-- Loads Track B model + MLP head ensemble
-- For each triple:
-  1. Encode with Track B → get embeddings
-  2. Construct pairwise features
-  3. Pass through MLP head(s)
-  4. Average scores if using ensemble
-  5. Apply temperature scaling
-  6. Compare scores to make prediction
-- Saves predictions to `track_a.jsonl`
-
-**Late Fusion**:
-- **Status**: Described in APPROACH.md but **not currently implemented** in inference scripts
-- Would combine Track B cosine similarities + Track A head scores
-- Requires fitting calibration layer on dev set
-- Can be added as future enhancement if needed
+  The script loops over these values and keeps only the best combination.
 
 ---
 
-## 8. Expected Impact
+### Track A – Triple Classification
 
-While actual gains depend on hidden test data, this v2 approach should:
+We recommend using a similar script for Track A: `scripts/run_track_a_experiments.py`.
+This script runs the triple classifier training with different hyperparameters and selects
+the best configuration.
+
+```bash
+python scripts/run_track_a_experiments.py
+```
+
+This script should:
+
+1. Backup `config.yaml` to `config.yaml.backup`.
+2. Run a baseline training with the current `track_a` settings.
+3. Try different combinations of:
+
+   - `mlp_hidden_dim` (e.g. 512, 1024)
+   - `mlp_dropout` (e.g. 0.1, 0.2, 0.3)
+   - `learning_rate` (e.g. 5e-5, 1e-4, 2e-4)
+   - `distill_weight` (e.g. 0.0, 0.3, 0.5)
+   - `freeze_track_b` (True vs False, for light joint fine‑tuning)
+
+4. Parse the validation accuracy from the training logs.
+5. Save all results to `experiments_track_a.json`.
+6. Update `config.yaml` with the best‑performing configuration.
+
+**Where to change ranges**
+
+At the top of `scripts/run_track_a_experiments.py`, define the ranges as simple Python lists:
+
+```python
+HIDDEN_DIMS     = [512, 1024]
+DROPOUTS        = [0.1, 0.2, 0.3]
+LEARNING_RATES  = [5e-5, 1e-4, 2e-4]
+DISTILL_WEIGHTS = [0.0, 0.3, 0.5]
+FREEZE_OPTIONS  = [True, False]
+```
+
+To explore a different range, just edit these lists; you do **not** need to touch the
+training code.
+```
+
+---
+
+## 5. Summary of v10 Changes
 
 - **Track B**:
-  - Improve robustness via:
-    - Better metric-aligned loss (margin + softmax).
-    - Hard negative mining.
-    - Projection + stronger regularization.
-  - Expected gain: **+1–2% absolute** over the current ~0.94, if there is remaining headroom.
+  - Trainer architecture unchanged.
+  - `run_track_b_experiments.py` becomes the primary interface for training.
+  - Regularization, temperature/margin, and hard negative settings are searched via small grids
+    defined in `config.yaml` and at the top of the script.
 
 - **Track A**:
-  - Eliminate heavy cross-encoder overfitting by using a small head on a strong embedding space.
-  - Enforce full consistency with Track B because both operate on the same embeddings.
-  - Late fusion can leverage differences between cosine and head scores.
-  - Expected gain: **+2–3% absolute** over the current ~0.89, making Track A competitive with or
-    slightly better than Track B.
+  - Model architecture unchanged.
+  - New `run_track_a_experiments.py` script controls hyperparameter sweeps for the MLP head and
+    distillation strength.
+  - Ranges are declared in one place (lists at the top of the script) so they are easy to modify.
 
-The key philosophy is: **One powerful, metric-aligned bi-encoder (Track B) + a tiny interaction
-layer (Track A) + simple calibration** is a better match to the very low-data regime of this task
-than two large, independently trained transformers.
+- **README**:
+  - New section explaining, in simple terms, how to run sweeps and where to edit the search ranges,
+    aimed at users who are not familiar with hyperparameter tuning.
+
+This approach focuses squarely on **systematic tuning** around your already strong models, which is the
+most realistic way to push accuracy beyond the current ~0.94/0.95 without over‑engineering the system.

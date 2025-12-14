@@ -78,11 +78,49 @@ augmentation:
 
 **Note**: This step is optional but recommended for better generalization.
 
-### 3) Train Track B (bi-encoder with projection head + improvements)
+### 3) Train Track B (bi-encoder with projection head)
 
-**You have 3 options:**
+**V10 Approach: Systematic Hyperparameter Tuning**
 
-#### **Option A: Quick Test** ⚡ (Recommended First - 17 min)
+You have 3 options:
+
+#### **Option A: Automated Experiment Runner** 🤖 (Recommended - Best Results)
+Let the script systematically search for the best hyperparameters:
+```bash
+python scripts/run_track_b_experiments.py
+```
+
+**What it does**:
+1. Backs up your current `config.yaml` to `config.yaml.backup`
+2. Runs a **baseline** with current settings
+3. Tests incremental improvements:
+   - **Regularization sweep**: Tests 9 combinations of projection dropout × weight decay
+   - **Hyperparameter sweep**: Tests temperature × margin combinations
+   - **Hard negative mining**: Tests 6 combinations of k × epochs
+   - **SimCSE**: Optional consistency loss if needed
+4. Only keeps experiments that improve validation accuracy
+5. Saves all results in `experiments_track_b.json`
+6. Writes the best configuration back into `config.yaml`
+
+**Where to change search ranges**:
+- Open `scripts/run_track_b_experiments.py`
+- Edit the constants at the top:
+  ```python
+  REG_DROPOUTS = [0.0, 0.1, 0.2]           # Projection dropout values
+  REG_WEIGHT_DECAYS = [0.03, 0.06, 0.1]    # Projection weight decay values
+  HARD_K = [3, 5, 7]                       # Hard negative k values
+  HARD_EPOCHS = [1, 2]                     # Hard negative epochs
+  ```
+- Temperature/margin grids are in `config.yaml`:
+  ```yaml
+  track_b:
+    temperature_grid: [0.5, 0.7, 0.9, 1.1]
+    margin_grid: [0.05, 0.1, 0.2, 0.3]
+  ```
+
+**Expected time**: ~60-90 minutes (depends on grid size)
+
+#### **Option B: Quick Manual Test** ⚡ (Fast - 17 min)
 Just enable hyperparameter sweep to optimize current model:
 ```yaml
 # config.yaml
@@ -92,29 +130,15 @@ track_b:
 ```bash
 python training/train_track_b.py
 ```
-This tests 9 combinations of temperature × margin and picks the best.
-
-#### **Option B: Full Automatic Optimization** 🤖 (Best Results - 45 min)
-Let the script find the best combination of improvements:
-```bash
-python scripts/run_track_b_experiments.py
-```
-This incrementally tests:
-1. Baseline (current)
-2. + Better regularization
-3. + Hyperparameter sweep
-4. + Hard negative mining
-5. + SimCSE (if needed)
-
-Keeps what works, reverts what doesn't. **Fully automated!**
+This tests temperature × margin combinations and picks the best.
 
 #### **Option C: Manual Configuration** 🎛️ (Custom)
 Enable specific improvements in `config.yaml`:
 ```yaml
 track_b:
   # Recommended baseline
-  projection_dropout: 0.15
-  projection_weight_decay: 0.08
+  projection_dropout: 0.1
+  projection_weight_decay: 0.06
   enable_hyperparam_sweep: true
   
   # High impact (if you have time)
@@ -129,20 +153,19 @@ track_b:
 python training/train_track_b.py
 ```
 
-**V2 Features**:
+**V10 Features**:
 - Adds 512-dim projection head (reduces from 1024 to 512)
 - Uses unified composite loss: MarginRanking + PairwiseSoftmax + MNR
-- **NEW**: Hard negative mining for better discrimination
+- **NEW**: Grid search for regularization (dropout × weight decay)
+- **NEW**: Grid search for hard negative mining (k × epochs)
 - **NEW**: Hyperparameter sweep for optimal temperature & margin
-- **NEW**: Enhanced regularization (projection dropout + weight decay)
 - **NEW**: Optional SimCSE consistency loss
-- Removes obsolete A→B distillation
 
 **Expected Accuracy Progression**:
 - Baseline: 0.940
-- + Regularization: 0.943
-- + Hyperparam Sweep: 0.946
-- + Hard Negatives: 0.952
+- + Best Regularization: 0.943-0.945
+- + Hyperparam Sweep: 0.946-0.948
+- + Best Hard Negatives: 0.950-0.955
 - **Target: 0.950+** ✅
 
 **If T4 OOM**: Lower `batch_size` in config, or switch `base_model` to `bge-base`.
@@ -150,20 +173,61 @@ python training/train_track_b.py
 **Data Augmentation**: If you ran `augment_training_data.py` and set `use_augmented_data: true`, training will automatically use the augmented dataset from `data/augmented/`.
 
 ### 4) Train Track A (MLP head over Track B embeddings)
+
+**V10 Approach: Systematic Hyperparameter Tuning**
+
+You have 2 options:
+
+#### **Option A: Automated Experiment Runner** 🤖 (Recommended - Best Results)
+Let the script systematically search for the best hyperparameters:
+```bash
+python scripts/run_track_a_experiments.py
+```
+
+**What it does**:
+1. Backs up your current `config.yaml` to `config.yaml.backup`
+2. Runs a **baseline** with current settings
+3. Tests incremental improvements:
+   - **Distillation sweep**: Tests different distillation weights (0.0, 0.3, 0.5)
+   - **Head architecture sweep**: Tests 6 combinations of hidden_dim × dropout
+   - **Learning rate sweep**: Tests different learning rates (5e-5, 1e-4, 2e-4)
+   - **Joint fine-tuning**: Optional unfreezing of Track B
+4. Only keeps experiments that improve validation accuracy
+5. Saves all results in `experiments_track_a.json`
+6. Writes the best configuration back into `config.yaml`
+
+**Where to change search ranges**:
+- Open `scripts/run_track_a_experiments.py`
+- Edit the constants at the top:
+  ```python
+  HIDDEN_DIMS = [512, 1024]              # MLP hidden dimensions
+  DROPOUTS = [0.1, 0.2, 0.3]             # MLP dropout values
+  LEARNING_RATES = [5e-5, 1e-4, 2e-4]    # Learning rates to test
+  DISTILL_WEIGHTS = [0.0, 0.3, 0.5]      # Distillation weights
+  FREEZE_OPTIONS = [True, False]         # Whether to freeze Track B
+  ```
+
+**Expected time**: ~45-60 minutes (depends on grid size)
+
+#### **Option B: Manual Training** 🎛️ (Custom)
+Train with current config settings:
 ```bash
 python training/train_track_a.py
 ```
-**V2 Features**:
+
+**V10 Features**:
 - Lightweight MLP head (not cross-encoder)
-- Operates on frozen Track B embeddings
+- Operates on frozen Track B embeddings (or optionally fine-tuned)
 - Pairwise features: `[e_anchor, e_cand, |e_anchor - e_cand|, e_anchor ⊙ e_cand]`
-- Distillation from Track B cosine similarities
+- **NEW**: Grid search for distillation weight
+- **NEW**: Grid search for head architecture (hidden_dim × dropout)
+- **NEW**: Grid search for learning rate
+- **NEW**: Optional joint fine-tuning experiment
 - K-fold cross-validation for robustness
-- Removes obsolete B→A distillation from cross-encoder
 
 **Requirements**: Track B must be trained first!
 
-**Expected Accuracy**: 0.950-0.955
+**Expected Accuracy**: 0.950-0.960
 
 **Data Augmentation**: Same as Track B - will use augmented data if enabled.
 

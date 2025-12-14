@@ -1,15 +1,15 @@
 """
-Experiment runner for Track B improvements.
+Experiment runner for Track B improvements (v10).
 
 This script runs incremental experiments to test different improvements:
 1. Baseline (current config)
-2. + Better regularization (projection dropout + weight decay)
-3. + Hyperparameter sweep
-4. + Hard negative mining
+2. + Better regularization (grid search over dropout × weight_decay)
+3. + Hyperparameter sweep (temperature × margin)
+4. + Hard negative mining (grid search over k × epochs)
 5. + SimCSE (if still < target accuracy)
 
 Each experiment builds on the previous one, keeping successful improvements.
-Results are saved to experiments.json for analysis.
+Results are saved to experiments_track_b.json for analysis.
 """
 
 import json
@@ -19,6 +19,12 @@ import yaml
 import subprocess
 import shutil
 from datetime import datetime
+
+# Hyperparameter search grids (v10)
+REG_DROPOUTS = [0.0, 0.1, 0.2]
+REG_WEIGHT_DECAYS = [0.03, 0.06, 0.1]
+HARD_K = [3, 5, 7]
+HARD_EPOCHS = [1, 2]
 
 
 def load_config(config_path: str = "config.yaml") -> dict:
@@ -127,29 +133,36 @@ def main():
     baseline_accuracy = baseline_result.get('accuracy', 0.0)
     print(f"\n📊 Baseline accuracy: {baseline_accuracy:.4f}")
     
-    # Experiment 2: + Better Regularization
-    config_reg = load_config(backup_path)
-    config_reg['track_b']['projection_dropout'] = 0.15
-    config_reg['track_b']['projection_weight_decay'] = 0.08
-    
+    # Experiment 2: + Better Regularization (Grid Search)
     print(f"\n{'='*70}")
-    print("IMPROVEMENT 1: Better Regularization")
+    print("IMPROVEMENT 1: Better Regularization (Grid Search)")
     print(f"{'='*70}")
-    print("\nChanges:")
-    print(f"  projection_dropout: 0.0 → 0.15")
-    print(f"  projection_weight_decay: 0.01 → 0.08")
+    print(f"\nSearching over {len(REG_DROPOUTS)} dropouts × {len(REG_WEIGHT_DECAYS)} weight_decays = {len(REG_DROPOUTS) * len(REG_WEIGHT_DECAYS)} combinations")
     
-    reg_result = run_experiment("+ Regularization", config_reg, config_path)
-    experiments.append(reg_result)
+    best_reg_result = None
+    best_reg_config = None
     
-    reg_accuracy = reg_result.get('accuracy', 0.0)
+    for d in REG_DROPOUTS:
+        for wd in REG_WEIGHT_DECAYS:
+            cfg = load_config(backup_path)
+            cfg['track_b']['projection_dropout'] = d
+            cfg['track_b']['projection_weight_decay'] = wd
+            
+            result = run_experiment(f'+ Reg (drop={d}, wd={wd})', cfg, config_path)
+            experiments.append(result)
+            
+            if best_reg_result is None or result.get('accuracy', 0.0) > best_reg_result.get('accuracy', 0.0):
+                best_reg_result = result
+                best_reg_config = cfg
+    
+    reg_accuracy = best_reg_result.get('accuracy', 0.0)
     delta = reg_accuracy - baseline_accuracy
-    print(f"\n📊 Accuracy: {reg_accuracy:.4f} (Δ={delta:+.4f})")
+    print(f"\n📊 Best Regularization Accuracy: {reg_accuracy:.4f} (Δ={delta:+.4f})")
     
     # Keep if improvement
     if reg_accuracy >= baseline_accuracy:
-        print("✓ Keeping regularization improvements")
-        base_config = config_reg
+        print("✓ Keeping best regularization settings")
+        base_config = best_reg_config
         baseline_accuracy = reg_accuracy
     else:
         print("✗ Reverting regularization (no improvement)")
@@ -179,30 +192,39 @@ def main():
     else:
         print("✗ Reverting sweep (no improvement)")
     
-    # Experiment 4: + Hard Negative Mining
-    config_hard = base_config.copy()
-    config_hard['track_b']['enable_hard_negatives'] = True
-    config_hard['track_b']['hard_negative_k'] = 5
-    config_hard['track_b']['hard_negative_epochs'] = 2
-    
+    # Experiment 4: + Hard Negative Mining (Grid Search)
     print(f"\n{'='*70}")
-    print("IMPROVEMENT 3: Hard Negative Mining")
+    print("IMPROVEMENT 3: Hard Negative Mining (Grid Search)")
     print(f"{'='*70}")
-    print("\nChanges:")
-    print(f"  enable_hard_negatives: False → True")
-    print(f"  hard_negative_k: 5")
-    print(f"  hard_negative_epochs: 2")
+    print(f"\nSearching over {len(HARD_K)} k values × {len(HARD_EPOCHS)} epochs = {len(HARD_K) * len(HARD_EPOCHS)} combinations")
     
-    hard_result = run_experiment("+ Hard Negatives", config_hard, config_path)
-    experiments.append(hard_result)
+    best_hard_result = None
+    best_hard_config = None
     
-    hard_accuracy = hard_result.get('accuracy', 0.0)
+    for k in HARD_K:
+        for e in HARD_EPOCHS:
+            cfg = load_config(backup_path)
+            # Apply all previous improvements
+            if base_config != load_config(backup_path):
+                cfg = base_config.copy()
+            cfg['track_b']['enable_hard_negatives'] = True
+            cfg['track_b']['hard_negative_k'] = k
+            cfg['track_b']['hard_negative_epochs'] = e
+            
+            result = run_experiment(f'+ HardNeg (k={k}, e={e})', cfg, config_path)
+            experiments.append(result)
+            
+            if best_hard_result is None or result.get('accuracy', 0.0) > best_hard_result.get('accuracy', 0.0):
+                best_hard_result = result
+                best_hard_config = cfg
+    
+    hard_accuracy = best_hard_result.get('accuracy', 0.0)
     delta = hard_accuracy - baseline_accuracy
-    print(f"\n📊 Accuracy: {hard_accuracy:.4f} (Δ={delta:+.4f})")
+    print(f"\n📊 Best Hard Negative Accuracy: {hard_accuracy:.4f} (Δ={delta:+.4f})")
     
     if hard_accuracy >= baseline_accuracy:
-        print("✓ Keeping hard negative mining")
-        base_config = config_hard
+        print("✓ Keeping best hard negative settings")
+        base_config = best_hard_config
         baseline_accuracy = hard_accuracy
     else:
         print("✗ Reverting hard negatives (no improvement)")

@@ -14,39 +14,39 @@ data:
   output_dir: "output"
   prepared_data_dir: "data/prepared"
 
-# Track B - Bi-encoder settings (v2: primary model with projection head)
+# Track B - Bi-encoder settings (v10: systematic hyperparameter tuning)
 track_b:
   base_model: "BAAI/bge-large-en-v1.5"  # High-perf backbone per APPROACH
   model_save_path: "models/track_b_embedder"
-  # V2 Architecture: Projection head for dimensionality reduction
+  # V10 Architecture: Projection head for dimensionality reduction
   projection_dim: 512      # Reduce from 1024 to 512 for better generalization
-  projection_dropout: 0.15 # Dropout in projection head for regularization
+  projection_dropout: 0.0  # Will be tuned via experiments (grid: 0.0, 0.1, 0.2)
   # Composite loss weights (v2 unified training)
   loss_weights:
     margin: 1.0            # MarginRankingLoss weight
     pairwise: 0.5          # PairwiseSoftmaxLoss weight
     mnr: 0.5               # MultipleNegativesRankingLoss weight
-    simcse: 0.1            # SimCSE consistency loss weight (optional)
+    simcse: 0.0            # SimCSE consistency loss weight (optional, enabled by experiments)
   margin: 0.2              # Margin for MarginRankingLoss
   # Training hyperparameters
   batch_size: 4            # Reduced for composite loss (more memory intensive)
-  epochs: 5                # Unified training phase
-  learning_rate: 1.0e-5
+  epochs: 4                # Unified training phase
+  learning_rate: 2.0e-5
   warmup_steps: 500
   weight_decay: 0.01       # Weight decay for backbone
-  projection_weight_decay: 0.08  # Higher weight decay for projection head
+  projection_weight_decay: 0.05  # Projection head weight decay (tuned via experiments)
   temperature: 0.7         # Sharper softmax per APPROACH
   max_seq_length: 384      # shorten sequences to save VRAM on T4
-  # Hard Negative Mining (IMPROVEMENT 1)
-  enable_hard_negatives: true  # Set to true to mine hard negatives
-  hard_negative_k: 5            # Number of hard negatives per anchor
-  hard_negative_epochs: 2       # Extra epochs on hard negatives
-  # Hyperparameter Sweep (IMPROVEMENT 2)
-  enable_hyperparam_sweep: true  # Set to true for post-training sweep
-  temperature_grid: [0.5, 0.7, 1.0]  # Temperature values to test
-  margin_grid: [0.1, 0.2, 0.3]       # Margin values to test
-  # SimCSE Consistency Loss (IMPROVEMENT 3)
-  enable_simcse: true     # Set to true for SimCSE loss
+  # Hard Negative Mining (tuned via experiments)
+  enable_hard_negatives: false  # Set to true or let experiments decide
+  hard_negative_k: 5            # Number of hard negatives per anchor (grid: 3, 5, 7)
+  hard_negative_epochs: 2       # Extra epochs on hard negatives (grid: 1, 2)
+  # Hyperparameter Sweep (recommended)
+  enable_hyperparam_sweep: false  # Set to true for post-training sweep
+  temperature_grid: [0.5, 0.7, 0.9, 1.1]  # Temperature values to test
+  margin_grid: [0.05, 0.1, 0.2, 0.3]      # Margin values to test
+  # SimCSE Consistency Loss (optional)
+  enable_simcse: false     # Set to true for SimCSE loss
   # Training options
   mixed_precision: true
   gradient_clip: 1.0
@@ -54,28 +54,28 @@ track_b:
   enable_gradient_checkpointing: true
   eval_steps: 100
 
-# Track A - MLP Head settings (v2: lightweight head over Track B embeddings)
+# Track A - MLP Head settings (v10: systematic hyperparameter tuning)
 track_a:
   architecture: "mlp_head"  # v2: MLP head instead of cross-encoder
   model_save_path: "models/track_a_mlp_head"
   # Track B dependency (must be trained first)
   track_b_model_path: "models/track_b_embedder"  # Relative path (works on Windows and Colab)
   freeze_track_b: true      # Head-only training (recommended first)
-  # MLP Head architecture
-  mlp_hidden_dim: 1024      # 2d where d=512 (projection_dim)
-  mlp_dropout: 0.2
+  # MLP Head architecture (tuned via experiments)
+  mlp_hidden_dim: 512       # Hidden dimension (grid: 512, 1024)
+  mlp_dropout: 0.2          # Dropout (grid: 0.1, 0.2, 0.3)
   # Training hyperparameters
-  batch_size: 8             # Can be larger since we're just training MLP head
-  epochs: 10                # More epochs for small head
-  learning_rate: 1.0e-4     # Higher LR for head-only training
+  batch_size: 16            # Can be larger since we're just training MLP head
+  epochs: 5                 # Training epochs
+  learning_rate: 1.0e-4     # Higher LR for head-only training (grid: 5e-5, 1e-4, 2e-4)
   warmup_ratio: 0.1
   weight_decay: 0.01
   # Loss configuration
   label_smoothing: 0.0
-  temperature: 0.7          # Sharper logits for better discrimination
-  # Distillation from Track B cosine similarities
-  distill_weight: 0.3       # KL divergence weight from Track B
-  distill_temperature: 0.7
+  temperature: 1.0          # Temperature for MLP scores
+  # Distillation from Track B cosine similarities (tuned via experiments)
+  distill_weight: 0.3       # KL divergence weight from Track B (grid: 0.0, 0.3, 0.5)
+  distill_temperature: 2.0  # Temperature for distillation
   # Training options
   mixed_precision: true
   gradient_clip: 1.0
