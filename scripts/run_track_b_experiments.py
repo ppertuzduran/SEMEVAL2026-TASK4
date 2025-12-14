@@ -54,20 +54,30 @@ def run_experiment(exp_name: str, config: dict, config_path: str) -> dict:
     save_config(config, config_path)
     
     # Run training
-    print(f"Running training with updated config...")
+    import time
+    start_time = time.time()
+    print(f"🚀 Starting training at {datetime.now().strftime('%H:%M:%S')}...")
+    print(f"📝 This may take 10-20 minutes depending on your GPU.")
+    print(f"⏳ Training in progress...\n")
+    
     result = subprocess.run(
         [sys.executable, "training/train_track_b.py"],
         capture_output=True,
         text=True
     )
     
+    elapsed_time = time.time() - start_time
+    minutes = int(elapsed_time // 60)
+    seconds = int(elapsed_time % 60)
+    
     if result.returncode != 0:
-        print(f"❌ Training failed!")
+        print(f"\n❌ Training failed after {minutes}m {seconds}s!")
         print(result.stderr)
         return {
             'name': exp_name,
             'status': 'failed',
-            'error': result.stderr
+            'error': result.stderr,
+            'duration_seconds': elapsed_time
         }
     
     # Extract accuracy from output
@@ -82,26 +92,34 @@ def run_experiment(exp_name: str, config: dict, config_path: str) -> dict:
                 pass
     
     if final_accuracy is None:
-        print(f"⚠️  Could not extract accuracy from output")
+        print(f"\n⚠️  Could not extract accuracy from output")
         final_accuracy = 0.0
     
-    print(f"\n✓ Experiment complete: {exp_name}")
-    print(f"  Accuracy: {final_accuracy:.4f}")
+    print(f"\n✅ Experiment complete: {exp_name}")
+    print(f"   Accuracy: {final_accuracy:.4f}")
+    print(f"   Duration: {minutes}m {seconds}s")
     
     return {
         'name': exp_name,
         'status': 'success',
         'accuracy': final_accuracy,
         'config': config['track_b'].copy(),
-        'timestamp': datetime.now().isoformat()
+        'timestamp': datetime.now().isoformat(),
+        'duration_seconds': elapsed_time
     }
 
 
 def main():
     """Run incremental experiments."""
+    import time
+    overall_start = time.time()
+    
     print("="*70)
     print("TRACK B INCREMENTAL EXPERIMENTS")
     print("="*70)
+    print(f"\n🕒 Started at: {datetime.now().strftime('%H:%M:%S')}")
+    print(f"📊 Expected total time: 60-90 minutes")
+    print(f"📦 Results will be saved to: experiments_track_b.json\n")
     
     config_path = "config.yaml"
     results_path = "experiments_track_b.json"
@@ -112,7 +130,8 @@ def main():
     # Backup original config
     backup_path = "config.yaml.backup"
     shutil.copy(config_path, backup_path)
-    print(f"\n✓ Backed up config to: {backup_path}")
+    print(f"\n✅ Backed up config to: {backup_path}")
+
     
     experiments = []
     
@@ -258,11 +277,16 @@ def main():
     save_config(base_config, config_path)
     
     # Save experiment results
+    overall_elapsed = time.time() - overall_start
+    overall_minutes = int(overall_elapsed // 60)
+    overall_seconds = int(overall_elapsed % 60)
+    
     with open(results_path, 'w') as f:
         json.dump({
             'experiments': experiments,
             'best_config': base_config['track_b'],
-            'final_accuracy': baseline_accuracy
+            'final_accuracy': baseline_accuracy,
+            'total_duration_seconds': overall_elapsed
         }, f, indent=2)
     
     # Print summary
@@ -270,25 +294,30 @@ def main():
     print("EXPERIMENT SUMMARY")
     print(f"{'='*70}\n")
     
-    print(f"{'Experiment':<30} {'Accuracy':<12} {'Delta':<10} {'Status':<10}")
-    print("-" * 70)
+    print(f"{'Experiment':<30} {'Accuracy':<12} {'Delta':<10} {'Duration':<12} {'Status':<10}")
+    print("-" * 80)
     
     for i, exp in enumerate(experiments):
         if exp['status'] == 'success':
             acc = exp['accuracy']
             delta = acc - experiments[0]['accuracy'] if i > 0 else 0.0
+            duration = exp.get('duration_seconds', 0)
+            dur_min = int(duration // 60)
+            dur_sec = int(duration % 60)
             status = "✓" if acc >= experiments[max(0, i-1)]['accuracy'] else "✗"
-            print(f"{exp['name']:<30} {acc:<12.4f} {delta:+<10.4f} {status:<10}")
+            print(f"{exp['name']:<30} {acc:<12.4f} {delta:+<10.4f} {dur_min}m {dur_sec}s{'':<6} {status:<10}")
         else:
-            print(f"{exp['name']:<30} {'FAILED':<12} {'-':<10} {'✗':<10}")
+            print(f"{exp['name']:<30} {'FAILED':<12} {'-':<10} {'-':<12} {'✗':<10}")
     
     print(f"\n{'='*70}")
     print(f"FINAL BEST ACCURACY: {baseline_accuracy:.4f}")
+    print(f"TOTAL TIME: {overall_minutes}m {overall_seconds}s")
     print(f"{'='*70}")
     
-    print(f"\n✓ Results saved to: {results_path}")
-    print(f"✓ Best config saved to: {config_path}")
-    print(f"✓ Original config backed up to: {backup_path}")
+    print(f"\n✅ Results saved to: {results_path}")
+    print(f"✅ Best config saved to: {config_path}")
+    print(f"✅ Original config backed up to: {backup_path}")
+
 
 
 if __name__ == "__main__":

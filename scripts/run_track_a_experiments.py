@@ -55,20 +55,30 @@ def run_experiment(exp_name: str, config: dict, config_path: str) -> dict:
     save_config(config, config_path)
     
     # Run training
-    print(f"Running training with updated config...")
+    import time
+    start_time = time.time()
+    print(f"🚀 Starting training at {datetime.now().strftime('%H:%M:%S')}...")
+    print(f"📝 This may take 5-15 minutes depending on your GPU.")
+    print(f"⏳ Training in progress...\n")
+    
     result = subprocess.run(
         [sys.executable, "training/train_track_a.py"],
         capture_output=True,
         text=True
     )
     
+    elapsed_time = time.time() - start_time
+    minutes = int(elapsed_time // 60)
+    seconds = int(elapsed_time % 60)
+    
     if result.returncode != 0:
-        print(f"❌ Training failed!")
+        print(f"\n❌ Training failed after {minutes}m {seconds}s!")
         print(result.stderr)
         return {
             'name': exp_name,
             'status': 'failed',
-            'error': result.stderr
+            'error': result.stderr,
+            'duration_seconds': elapsed_time
         }
     
     # Extract accuracy from output
@@ -85,18 +95,20 @@ def run_experiment(exp_name: str, config: dict, config_path: str) -> dict:
                 pass
     
     if final_accuracy is None:
-        print(f"⚠️  Could not extract accuracy from output")
+        print(f"\n⚠️  Could not extract accuracy from output")
         final_accuracy = 0.0
     
-    print(f"\n✓ Experiment complete: {exp_name}")
-    print(f"  Accuracy: {final_accuracy:.4f}")
+    print(f"\n✅ Experiment complete: {exp_name}")
+    print(f"   Accuracy: {final_accuracy:.4f}")
+    print(f"   Duration: {minutes}m {seconds}s")
     
     return {
         'name': exp_name,
         'status': 'success',
         'accuracy': final_accuracy,
         'config': config['track_a'].copy(),
-        'timestamp': datetime.now().isoformat()
+        'timestamp': datetime.now().isoformat(),
+        'duration_seconds': elapsed_time
     }
 
 
