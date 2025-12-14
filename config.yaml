@@ -42,7 +42,7 @@ track_b:
   hard_negative_k: 5            # Number of hard negatives per anchor (grid: 3, 5, 7)
   hard_negative_epochs: 2       # Extra epochs on hard negatives (grid: 1, 2)
   # Hyperparameter Sweep (recommended)
-  enable_hyperparam_sweep: false  # Set to true for post-training sweep
+  enable_hyperparam_sweep: true  # Set to true for post-training sweep
   temperature_grid: [0.5, 0.7, 0.9, 1.1]  # Temperature values to test
   margin_grid: [0.05, 0.1, 0.2, 0.3]      # Margin values to test
   # SimCSE Consistency Loss (optional)
