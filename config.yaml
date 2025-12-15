@@ -38,7 +38,7 @@ track_b:
   temperature: 0.5         # Sharper softmax per APPROACH
   max_seq_length: 384      # shorten sequences to save VRAM on T4
   # Hard Negative Mining (v11: disabled by default for clean baseline)
-  enable_hard_negatives: true  # v11: Disabled per APPROACH.md (simplified loss)
+  enable_hard_negatives: false  # v11: Disabled per APPROACH.md (simplified loss)
   hard_negative_k: 5            # Number of hard negatives per anchor (grid: 3, 5, 7)
   hard_negative_epochs: 2       # Extra epochs on hard negatives (grid: 1, 2)
   # Hyperparameter Sweep (recommended)
