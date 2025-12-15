@@ -93,7 +93,7 @@ track_a:
 # Data augmentation
 augmentation:
   # Use augmented data for training
-  use_augmented_data: false  # Set to true after running augment_training_data.py
+  use_augmented_data: true  # Set to true after running augment_training_data.py
   
   # Augmentation strategies (for generation via augment_training_data.py)
   strategies:
