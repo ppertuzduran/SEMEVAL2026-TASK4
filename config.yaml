@@ -65,17 +65,17 @@ track_a:
   mlp_hidden_dim: 512       # Hidden dimension (grid: 512, 1024)
   mlp_dropout: 0.2          # Dropout (grid: 0.1, 0.2, 0.3)
   # Training hyperparameters
-  batch_size: 16            # Can be larger since we're just training MLP head
-  epochs: 5                 # Training epochs
+  batch_size: 8            # Can be larger since we're just training MLP head
+  epochs: 10                 # Training epochs
   learning_rate: 1.0e-4     # Higher LR for head-only training (grid: 5e-5, 1e-4, 2e-4)
   warmup_ratio: 0.1
   weight_decay: 0.01
   # Loss configuration
   label_smoothing: 0.0
-  temperature: 1.0          # Temperature for MLP scores
+  temperature: 0.7          # Temperature for MLP scores
   # Distillation from Track B cosine similarities (tuned via experiments)
   distill_weight: 0.3       # KL divergence weight from Track B (grid: 0.0, 0.3, 0.5)
-  distill_temperature: 2.0  # Temperature for distillation
+  distill_temperature: 0.7  # Temperature for distillation
   # Training options
   mixed_precision: true
   gradient_clip: 1.0
