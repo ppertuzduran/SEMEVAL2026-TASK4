@@ -556,7 +556,22 @@ def main():
     # Load base model
     base_model_name = config['track_b']['base_model']
     print(f"\nLoading base model: {base_model_name}")
-    model = SentenceTransformer(base_model_name, device=device)
+    
+    # Check if model is pre-downloaded to Drive (for Qwen3-Embedding)
+    if "Qwen" in base_model_name:
+        # Try to load from Drive first (faster, avoids download)
+        drive_model_path = colab_paths['models_dir'] / "Qwen3-Embedding-4B"
+        if drive_model_path.exists():
+            print(f"✓ Found pre-downloaded model in Drive: {drive_model_path}")
+            model = SentenceTransformer(str(drive_model_path), device=device)
+        else:
+            print(f"⚠️  Model not found in Drive at: {drive_model_path}")
+            print(f"Downloading from HuggingFace (this may take 5-10 minutes)...")
+            print(f"💡 Tip: Pre-download the model to Drive to speed up future runs")
+            model = SentenceTransformer(base_model_name, device=device)
+    else:
+        # For other models (e.g., BGE-large), download normally
+        model = SentenceTransformer(base_model_name, device=device)
     
     # Configure pooling for Qwen3-Embedding (if specified)
     pooling_mode = config['track_b'].get('pooling', None)
