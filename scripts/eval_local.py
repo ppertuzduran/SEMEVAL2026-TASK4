@@ -54,6 +54,20 @@ def evaluate_track_a(predictions_path: str, labels_path: str) -> Dict:
     y_pred = pred_df['text_a_is_closer'].values
     y_true = label_df['text_a_is_closer'].values
     
+    # Track incorrect predictions
+    incorrect_predictions = []
+    for idx, (pred, true) in enumerate(zip(y_pred, y_true)):
+        if pred != true:
+            row = label_df.iloc[idx]
+            incorrect_predictions.append({
+                'index': int(idx),
+                'anchor': row['anchor_text'][:50] + '...' if len(row['anchor_text']) > 50 else row['anchor_text'],
+                'text_a': row['text_a'][:50] + '...' if len(row['text_a']) > 50 else row['text_a'],
+                'text_b': row['text_b'][:50] + '...' if len(row['text_b']) > 50 else row['text_b'],
+                'predicted': bool(pred),
+                'actual': bool(true)
+            })
+    
     # Calculate metrics
     accuracy = accuracy_score(y_true, y_pred)
     precision = precision_score(y_true, y_pred, zero_division=0)
@@ -70,13 +84,16 @@ def evaluate_track_a(predictions_path: str, labels_path: str) -> Dict:
         'f1_score': float(f1),
         'confusion_matrix': cm.tolist(),
         'total_samples': len(y_true),
-        'correct_predictions': int((y_pred == y_true).sum())
+        'correct_predictions': int((y_pred == y_true).sum()),
+        # Diagnostic information
+        'incorrect_predictions_count': len(incorrect_predictions),
+        'incorrect_predictions': incorrect_predictions[:10]  # First 10
     }
     
     return metrics
 
 
-def evaluate_track_b_with_track_a(embeddings_path: str, labels_path: str, track_b_path: str = None) -> Dict:
+def evaluate_track_b_with_track_a(embeddings_path: str, labels_path: str, track_b_path: str = None, uncertainty_threshold: float = 0.05) -> Dict:
     """
     Evaluate Track B embeddings using Track A labels.
     
@@ -84,9 +101,10 @@ def evaluate_track_b_with_track_a(embeddings_path: str, labels_path: str, track_
         embeddings_path: Path to embeddings .npy file
         labels_path: Path to Track A ground truth JSONL
         track_b_path: Path to Track B data JSONL (for text-to-embedding mapping)
+        uncertainty_threshold: Threshold for uncertain predictions (default: 0.05)
         
     Returns:
-        Dictionary of evaluation metrics
+        Dictionary of evaluation metrics including failure diagnostics
     """
     from sentence_transformers.util import cos_sim
     
@@ -112,17 +130,85 @@ def evaluate_track_b_with_track_a(embeddings_path: str, labels_path: str, track_
     # Load Track A labels
     label_df = pd.read_json(labels_path, lines=True)
     
-    # Calculate predictions
+    # Track failures and diagnostics
+    missing_embeddings = []
+    uncertain_predictions = []
+    incorrect_predictions = []
     predictions = []
-    for _, row in label_df.iterrows():
+    similarity_scores = []
+    
+    # Calculate predictions
+    for idx, row in label_df.iterrows():
+        # Check for missing embeddings
+        missing_texts = []
+        if row['anchor_text'] not in text_to_embedding:
+            missing_texts.append(('anchor', row['anchor_text']))
+        if row['text_a'] not in text_to_embedding:
+            missing_texts.append(('text_a', row['text_a']))
+        if row['text_b'] not in text_to_embedding:
+            missing_texts.append(('text_b', row['text_b']))
+        
+        if missing_texts:
+            missing_embeddings.append({
+                'index': int(idx),
+                'missing_texts': missing_texts,
+                'anchor': row['anchor_text'],
+                'text_a': row['text_a'],
+                'text_b': row['text_b']
+            })
+            # Skip this sample
+            predictions.append(False)  # Default prediction
+            similarity_scores.append({'sim_a': None, 'sim_b': None, 'diff': None})
+            continue
+        
+        # Get embeddings
         anchor_emb = text_to_embedding[row['anchor_text']]
         a_emb = text_to_embedding[row['text_a']]
         b_emb = text_to_embedding[row['text_b']]
         
+        # Calculate similarities
         sim_a = cos_sim(anchor_emb, a_emb).item()
         sim_b = cos_sim(anchor_emb, b_emb).item()
+        sim_diff = abs(sim_a - sim_b)
         
-        predictions.append(sim_a > sim_b)
+        # Make prediction
+        pred = sim_a > sim_b
+        predictions.append(pred)
+        
+        # Store similarity scores
+        similarity_scores.append({
+            'sim_a': float(sim_a),
+            'sim_b': float(sim_b),
+            'diff': float(sim_diff)
+        })
+        
+        # Track uncertain predictions (small difference)
+        if sim_diff < uncertainty_threshold:
+            uncertain_predictions.append({
+                'index': int(idx),
+                'anchor': row['anchor_text'][:50] + '...' if len(row['anchor_text']) > 50 else row['anchor_text'],
+                'text_a': row['text_a'][:50] + '...' if len(row['text_a']) > 50 else row['text_a'],
+                'text_b': row['text_b'][:50] + '...' if len(row['text_b']) > 50 else row['text_b'],
+                'sim_a': float(sim_a),
+                'sim_b': float(sim_b),
+                'diff': float(sim_diff),
+                'predicted': pred,
+                'actual': bool(row['text_a_is_closer'])
+            })
+        
+        # Track incorrect predictions
+        if pred != row['text_a_is_closer']:
+            incorrect_predictions.append({
+                'index': int(idx),
+                'anchor': row['anchor_text'][:50] + '...' if len(row['anchor_text']) > 50 else row['anchor_text'],
+                'text_a': row['text_a'][:50] + '...' if len(row['text_a']) > 50 else row['text_a'],
+                'text_b': row['text_b'][:50] + '...' if len(row['text_b']) > 50 else row['text_b'],
+                'sim_a': float(sim_a),
+                'sim_b': float(sim_b),
+                'diff': float(sim_diff),
+                'predicted': pred,
+                'actual': bool(row['text_a_is_closer'])
+            })
     
     # Calculate metrics
     y_true = label_df['text_a_is_closer'].values
@@ -133,6 +219,10 @@ def evaluate_track_b_with_track_a(embeddings_path: str, labels_path: str, track_
     recall = recall_score(y_true, y_pred, zero_division=0)
     f1 = f1_score(y_true, y_pred, zero_division=0)
     
+    # Calculate similarity statistics
+    valid_scores = [s for s in similarity_scores if s['diff'] is not None]
+    avg_sim_diff = np.mean([s['diff'] for s in valid_scores]) if valid_scores else 0.0
+    
     metrics = {
         'accuracy': float(accuracy),
         'precision': float(precision),
@@ -140,7 +230,16 @@ def evaluate_track_b_with_track_a(embeddings_path: str, labels_path: str, track_
         'f1_score': float(f1),
         'total_samples': len(y_true),
         'correct_predictions': int((y_pred == y_true).sum()),
-        'embedding_dim': embeddings.shape[1]
+        'embedding_dim': embeddings.shape[1],
+        # Diagnostic information
+        'missing_embeddings_count': len(missing_embeddings),
+        'missing_embeddings': missing_embeddings[:10],  # First 10 for brevity
+        'uncertain_predictions_count': len(uncertain_predictions),
+        'uncertain_predictions': uncertain_predictions[:10],  # First 10
+        'incorrect_predictions_count': len(incorrect_predictions),
+        'incorrect_predictions': incorrect_predictions[:10],  # First 10
+        'avg_similarity_diff': float(avg_sim_diff),
+        'uncertainty_threshold': uncertainty_threshold
     }
     
     return metrics
@@ -167,6 +266,61 @@ def print_metrics(metrics: Dict, title: str):
     
     if 'embedding_dim' in metrics:
         print(f"Embedding dim: {metrics['embedding_dim']}")
+    
+    # Print Track A diagnostic information
+    if 'incorrect_predictions_count' in metrics and 'missing_embeddings_count' not in metrics:
+        print(f"\n{'-'*60}")
+        print("TRACK A DIAGNOSTICS")
+        print(f"{'-'*60}")
+        
+        # Incorrect predictions
+        print(f"\n✗ Incorrect Predictions: {metrics['incorrect_predictions_count']}")
+        if metrics['incorrect_predictions_count'] > 0:
+            print(f"   Sample failures:")
+            for item in metrics['incorrect_predictions'][:5]:  # Show first 5
+                print(f"   - Index {item['index']}")
+                print(f"      Predicted: {'A' if item['predicted'] else 'B'}, Actual: {'A' if item['actual'] else 'B'}")
+            if metrics['incorrect_predictions_count'] > 5:
+                print(f"   ... and {metrics['incorrect_predictions_count'] - 5} more")
+    
+    # Print Track B diagnostic information
+    if 'missing_embeddings_count' in metrics:
+        print(f"\n{'-'*60}")
+        print("TRACK B DIAGNOSTICS")
+        print(f"{'-'*60}")
+        
+        # Missing embeddings
+        if metrics['missing_embeddings_count'] > 0:
+            print(f"\n⚠️  Missing Embeddings: {metrics['missing_embeddings_count']}")
+            print(f"   Stories where embedding lookup failed:")
+            for item in metrics['missing_embeddings'][:5]:  # Show first 5
+                missing_fields = ', '.join([f[0] for f in item['missing_texts']])
+                print(f"   - Index {item['index']}: Missing {missing_fields}")
+            if metrics['missing_embeddings_count'] > 5:
+                print(f"   ... and {metrics['missing_embeddings_count'] - 5} more")
+        else:
+            print(f"\n✓ No missing embeddings")
+        
+        # Uncertain predictions
+        print(f"\n🤔 Uncertain Predictions: {metrics['uncertain_predictions_count']}")
+        print(f"   (similarity difference < {metrics['uncertainty_threshold']:.3f})")
+        if metrics['uncertain_predictions_count'] > 0:
+            print(f"   Avg similarity diff: {metrics.get('avg_similarity_diff', 0):.4f}")
+            print(f"\n   Top uncertain cases:")
+            for item in metrics['uncertain_predictions'][:3]:  # Show first 3
+                status = "✓" if item['predicted'] == item['actual'] else "✗"
+                print(f"   {status} Index {item['index']}: sim_a={item['sim_a']:.4f}, sim_b={item['sim_b']:.4f}, diff={item['diff']:.4f}")
+                print(f"      Predicted: {'A' if item['predicted'] else 'B'}, Actual: {'A' if item['actual'] else 'B'}")
+        
+        # Incorrect predictions
+        print(f"\n✗ Incorrect Predictions: {metrics['incorrect_predictions_count']}")
+        if metrics['incorrect_predictions_count'] > 0:
+            print(f"   Sample failures:")
+            for item in metrics['incorrect_predictions'][:3]:  # Show first 3
+                print(f"   - Index {item['index']}: sim_a={item['sim_a']:.4f}, sim_b={item['sim_b']:.4f}, diff={item['diff']:.4f}")
+                print(f"      Predicted: {'A' if item['predicted'] else 'B'}, Actual: {'A' if item['actual'] else 'B'}")
+            if metrics['incorrect_predictions_count'] > 3:
+                print(f"   ... and {metrics['incorrect_predictions_count'] - 3} more")
 
 
 def compare_models(metrics_list: list, names: list):
