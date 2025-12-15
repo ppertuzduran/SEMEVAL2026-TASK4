@@ -54,19 +54,28 @@ def evaluate_track_a(predictions_path: str, labels_path: str) -> Dict:
     y_pred = pred_df['text_a_is_closer'].values
     y_true = label_df['text_a_is_closer'].values
     
+    # Check if scores are available in predictions
+    has_scores = 'score' in pred_df.columns or 'probability' in pred_df.columns
+    score_field = 'score' if 'score' in pred_df.columns else 'probability' if 'probability' in pred_df.columns else None
+    
     # Track incorrect predictions
     incorrect_predictions = []
     for idx, (pred, true) in enumerate(zip(y_pred, y_true)):
         if pred != true:
             row = label_df.iloc[idx]
-            incorrect_predictions.append({
+            pred_row = pred_df.iloc[idx]
+            item = {
                 'index': int(idx),
                 'anchor': row['anchor_text'],
                 'text_a': row['text_a'],
                 'text_b': row['text_b'],
                 'predicted': bool(pred),
                 'actual': bool(true)
-            })
+            }
+            # Add score if available
+            if score_field:
+                item['score'] = float(pred_row[score_field])
+            incorrect_predictions.append(item)
     
     # Calculate metrics
     accuracy = accuracy_score(y_true, y_pred)
@@ -87,7 +96,8 @@ def evaluate_track_a(predictions_path: str, labels_path: str) -> Dict:
         'correct_predictions': int((y_pred == y_true).sum()),
         # Diagnostic information
         'incorrect_predictions_count': len(incorrect_predictions),
-        'incorrect_predictions': incorrect_predictions[:10]  # First 10
+        'incorrect_predictions': incorrect_predictions[:10],  # First 10
+        'has_scores': has_scores
     }
     
     return metrics
@@ -280,6 +290,8 @@ def print_metrics(metrics: Dict, title: str):
             for i, item in enumerate(metrics['incorrect_predictions'][:5], 1):
                 print(f"\n   [{i}] Index {item['index']}")
                 print(f"       Predicted: {'A' if item['predicted'] else 'B'}, Actual: {'A' if item['actual'] else 'B'}")
+                if 'score' in item:
+                    print(f"       Score: {item['score']:.4f}")
                 print(f"       Anchor: {item['anchor']}")
                 print(f"       Text A: {item['text_a']}")
                 print(f"       Text B: {item['text_b']}")
