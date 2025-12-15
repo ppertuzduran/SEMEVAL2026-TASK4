@@ -27,7 +27,7 @@ track_b:
     pairwise: 0.5          # PairwiseSoftmaxLoss weight
     mnr: 0.5               # MultipleNegativesRankingLoss weight
     simcse: 0.0            # SimCSE consistency loss weight (optional, enabled by experiments)
-  margin: 0.05              # Margin for MarginRankingLoss
+  margin: 0.1              # Margin for MarginRankingLoss
   # Training hyperparameters
   batch_size: 4            # Reduced for composite loss (more memory intensive)
   epochs: 4                # Unified training phase
