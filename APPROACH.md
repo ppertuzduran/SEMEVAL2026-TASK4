@@ -1,411 +1,371 @@
-# APPROACH v10 – Focused Improvements for Tracks A & B
+# APPROACH v11 – Qwen3-Embedding Backbone Upgrade
 
-This version of the approach document focuses on **what to change going forward**, not on restating the whole existing pipeline.
+## 1. Overview
 
-You already have:
+This document describes **APPROACH v11**, an evolution of the previous methodology used in this competition.
 
-- Track B: a strong bi‑encoder (BGE‑large) with a projection head and composite loss.
-- Track A: a lightweight MLP head on top of Track B embeddings.
-- One experiment runner: `run_track_b_experiments.py`.
+The key change in this version is the **replacement of the backbone embedding model**
+`BAAI/bge-large-en-v1.5` with **Qwen3-Embedding**, starting with:
 
-The goal of v10 is to:
-1. Turn Track B into a **properly tuned metric learner** via systematic hyperparameter sweeps.
-2. Give Track A its **own experiment runner** with sensible search spaces.
-3. Make `README.md` explicit about **how to run sweeps** and **where to change ranges** for non‑experts.
+1. **Qwen/Qwen3-Embedding-4B** (initial validation and tuning), then  
+2. **Qwen/Qwen3-Embedding-8B** (final high-accuracy runs, subject to GPU resources).
 
----
+All other components (training scripts, loss design, evaluation logic, and inference format) are kept as
+consistent as possible to **isolate the impact of the backbone change**.
 
-## 1. Design Goals
+The rest of this document is organized as:
 
-- **Respect the competition rules**: Track B must produce embeddings story‑by‑story; Track A must operate on triples.
-- **Exploit what you already built**: keep the current architecture; optimize the hyperparameters.
-- **Stay Colab‑friendly**: small, discrete search spaces instead of giant Bayesian optimization.
-
----
-
-## 2. Track B – Embedding Model
-
-### 2.1 Training skeleton (kept as‑is)
-
-We keep the existing training logic in `train_track_b.py`:
-
-- Base model: `BAAI/bge-large-en-v1.5`.
-- Projection head: linear (1024 → projection_dim) + normalization.
-- Losses: MultipleNegativesRankingLoss + CompositeLoss (margin ranking + pairwise softmax).
-- Optional phases: hard negative mining, SimCSE‑style consistency loss, temperature/margin sweep.
-
-We **do not** change the core trainer in v10. All changes are about **how we call it**.
-
-### 2.2 Make `run_track_b_experiments.py` the main entry point
-
-From v10 on, **Track B is not trained directly with `train_track_b.py` anymore** in normal usage. Instead:
-
-- Users call:
-
-  ```bash
-  python scripts/run_track_b_experiments.py
-  ```
-
-- That script:
-  - Backs up `config.yaml` → `config.yaml.backup`.
-  - Runs a baseline training with current settings.
-  - Runs several incremental experiments, each mutating a *small set* of hyperparameters.
-  - Only keeps an experiment if validation accuracy improves.
-  - Writes all results to `experiments_track_b.json`.
-  - Updates `config.yaml` with the best‑performing configuration.
-
-This gives you **reproducible, logged model selection** without touching the trainer.
-
-### 2.3 Track B hyperparameters to search
-
-We expose a **compact, hand‑picked search space** via `config.yaml` and `run_track_b_experiments.py`.
-
-#### 2.3.1 `config.yaml` ranges (Track B section)
-
-Add/adjust the following under `track_b` in `config.yaml`:
-
-```yaml
-track_b:
-  # Projection & regularization
-  projection_dim: 512        # optionally test 384 vs 512 via experiments
-  weight_decay: 0.01         # backbone weight decay
-  projection_weight_decay: 0.05   # tuned via experiments
-
-  # Loss weights
-  loss_weights:
-    margin:   1.0            # margin ranking loss weight
-    pairwise: 0.5            # pairwise softmax loss weight
-    mnr:      0.5            # MultipleNegativesRankingLoss weight
-    simcse:   0.0            # 0 by default; only enabled by experiments
-
-  # Temperature × margin sweep (used when enable_hyperparam_sweep: true)
-  temperature_grid: [0.5, 0.7, 0.9, 1.1]
-  margin_grid:      [0.05, 0.1, 0.2, 0.3]
-
-  # Hard negative mining defaults (can be overridden by experiments)
-  hard_negative_k:      5
-  hard_negative_epochs: 2
-
-  # Training schedule (example values)
-  epochs: 4
-  batch_size: 16
-  learning_rate: 2e-5
-```
-
-These are baseline values; the sweeps below decide which ones to keep.
-
-#### 2.3.2 Experiment 1 – Regularization sweep
-
-At the top of `scripts/run_track_b_experiments.py`, define the regularization search space:
-
-```python
-REG_DROPOUTS = [0.0, 0.1, 0.2]
-REG_WEIGHT_DECAYS = [0.03, 0.06, 0.1]
-```
-
-Then, in the section currently labeled **“Experiment 2: + Better Regularization”**, replace the single hard‑coded setting with a loop:
-
-```python
-best_reg_result = None
-
-for d in REG_DROPOUTS:
-    for wd in REG_WEIGHT_DECAYS:
-        cfg = load_config(backup_path)
-        cfg['track_b']['projection_dropout'] = d
-        cfg['track_b']['projection_weight_decay'] = wd
-
-        result = run_experiment(f'+ Reg (drop={d}, wd={wd})', cfg, config_path)
-
-        if best_reg_result is None or result['accuracy'] > best_reg_result['accuracy']:
-            best_reg_result = result
-            base_config = cfg
-            baseline_accuracy = result['accuracy']
-```
-
-This turns regularization into a **small grid search** over dropout and projection‑head weight decay.
-
-#### 2.3.3 Experiment 2 – Temperature × margin sweep
-
-No structural changes needed; we just rely on the `temperature_grid` and `margin_grid` from `config.yaml`.
-
-- `run_track_b_experiments.py` sets `enable_hyperparam_sweep: true` in a temporary config.
-- `train_track_b.py` runs through all temperature/margin combinations and writes the best ones into `best_hyperparams.json` and your logs.
-- The experiment script reads the final accuracy and decides whether to keep it.
-
-If you want to tweak the range, you only touch `config.yaml` (not the trainer).
-
-#### 2.3.4 Experiment 3 – Hard negative mining sweep (optional)
-
-At the top of `run_track_b_experiments.py` add:
-
-```python
-HARD_K      = [3, 5, 7]
-HARD_EPOCHS = [1, 2]
-```
-
-Then, instead of a single `(k=5, epochs=2)` in the “Hard Negatives” experiment, loop:
-
-```python
-best_hard_result = None
-
-for k in HARD_K:
-    for e in HARD_EPOCHS:
-        cfg = load_config(backup_path)
-        cfg['track_b']['enable_hard_negatives'] = True
-        cfg['track_b']['hard_negative_k'] = k
-        cfg['track_b']['hard_negative_epochs'] = e
-
-        result = run_experiment(f'+ HardNeg (k={k}, e={e})', cfg, config_path)
-
-        if best_hard_result is None or result['accuracy'] > best_hard_result['accuracy']:
-            best_hard_result = result
-            base_config = cfg
-            baseline_accuracy = result['accuracy']
-```
-
-Again, the trainer is unchanged; we just vary the config around it.
-
-#### 2.3.5 Experiment 4 – SimCSE toggle
-
-Leave SimCSE as a final, optional regularization:
-
-- Baseline: `simcse_weight = 0.0` (off).
-- Experiment: set `simcse_weight` to something small, e.g. `0.1` in `config.yaml` or directly in the experiment script.
-
-Only keep it if it improves dev accuracy.
+- Repository & script mapping
+- Motivation for the backbone change
+- Detailed Track B approach (embeddings)
+- Detailed Track A approach (pairwise decision)
+- Inference and submission format
+- **Migration checklist** (what to change in code/configs)
+- **Risks, constraints & mitigations**
 
 ---
 
-## 3. Track A – Triple Classification Model
+## 2. Repository & Script Mapping
 
-For Track A, the main idea in v10 is the same: **do not redesign the trainer**, but **add an experiment runner** and standardize the search space.
+The approach assumes the following core files and roles in the repository:
 
-### 3.1 Keep the model architecture
+- **High-level documentation**
+  - `APPROACH.md` (this document)
 
-We keep:
+- **Training – Track B (embeddings)**
+  - `train_track_b.py`  
+    Main training entrypoint for Track B. Loads a base encoder, wraps it in a SentenceTransformer,
+    applies a projection head, and trains using triple-wise/narrative similarity supervision.
+  - `run_track_b_experiments.py`  
+    Orchestrates multiple training runs with different hyperparameters and writes logs.
 
-- Track B as the encoder (usually loaded frozen).
-- A single MLP head operating on concatenations of `(anchor, candidate)` embeddings:
-  - `φ(x) = [ e_anchor, e_x, |e_anchor - e_x|, e_anchor ⊙ e_x ]`.
-  - MLP: `4d → hidden_dim → 1` with GELU and dropout.
-- Optional distillation from Track B’s cosine‑based decision via `distill_weight` and `distill_temperature`.
+- **Training – Track A (triple decision)**
+  - `train_track_a.py`  
+    Loads a trained Track B model (frozen or lightly tuned), attaches an MLP classifier on top of
+    pairwise features, and trains on triples.
 
-No architecture change in v10; only hyperparameters.
+- **Inference**
+  - `track_b.py`  
+    Generates final Track B embeddings for all stories to be submitted to Codabench.
+  - `track_a.py`  
+    Uses Track B embeddings and the Track A classifier to generate A/B decisions for all triples.
 
-### 3.2 New script: `run_track_a_experiments.py`
+- **Evaluation & utilities**
+  - `eval_local.py`  
+    Local evaluation script to compute accuracy and/or the Codabench metric based on generated
+    embeddings or predictions.
+  - `augment_training_data.py`  
+    Script used to build an augmented training set for Track B (lexical perturbations, filters, etc.).
 
-Create a new script (e.g. in `scripts/run_track_a_experiments.py`) mirroring the Track B runner:
+- **Configuration**
+  - `config.yaml`, `best_config.yaml`, `configv8.yaml`  
+    YAML files describing model, training, and data parameters for different approach versions.
+    In v11, the model `name` or `base_model` field is updated to point to Qwen3-Embedding.
 
-- Backs up `config.yaml` → `config.yaml.backup`.
-- Runs a baseline training using `training/train_track_a.py`.
-- Applies several incremental improvements (different hyperparameter combinations).
-- Keeps only configurations that improve dev accuracy.
-- Saves all results to `experiments_track_a.json`.
-- Writes the best configuration back to `config.yaml`.
-
-#### 3.2.1 Hyperparameter ranges for Track A
-
-Define ranges at the top of `run_track_a_experiments.py`:
-
-```python
-HIDDEN_DIMS     = [512, 1024]
-DROPOUTS        = [0.1, 0.2, 0.3]
-LEARNING_RATES  = [5e-5, 1e-4, 2e-4]
-DISTILL_WEIGHTS = [0.0, 0.3, 0.5]
-FREEZE_OPTIONS  = [True, False]  # unfreeze only with lower LR / fewer epochs
-```
-
-This keeps the search space small and easy to modify.
-
-#### 3.2.2 Suggested experiment schedule
-
-**Step 0 – Baseline**  
-Use the existing `track_a` config as baseline. Run `train_track_a.py`, parse the validation accuracy from logs (e.g. last “validation accuracy” line), and store it.
-
-**Step 1 – Distillation sweep**  
-For each `distill_weight` in `DISTILL_WEIGHTS` (and a fixed `distill_temperature`, e.g. 2.0):
-
-- Clone the baseline config.
-- Set `track_a.distill_weight` and `track_a.distill_temperature`.
-- Train and record accuracy.
-- Keep the best setting (if it beats baseline).
-
-**Step 2 – Head size × dropout sweep**  
-For the best distillation config:
-
-- Loop over `HIDDEN_DIMS × DROPOUTS`.
-- Set `track_a.mlp_hidden_dim` and `track_a.mlp_dropout`.
-- Train and record accuracy.
-- Keep the best pair.
-
-**Step 3 – Learning rate sweep**  
-For the best head config:
-
-- Loop over `LEARNING_RATES`.
-- Set `track_a.learning_rate`.
-- Train and record accuracy.
-- Keep the best one.
-
-**Step 4 – Light joint fine‑tuning (optional)**  
-
-Only if you want to test slight improvements and you’re not overfitting:
-
-- For the best config so far:
-  - Set `track_a.freeze_track_b: False`.
-  - Set a **small LR** for encoder parameters (e.g. via a second param group in `train_track_a.py`, or by lowering global LR in config to `2e-5` and updating param‑group logic in the trainer).
-  - Reduce `track_a.epochs` (e.g. to `3`).
-- Train and keep the unfreezed variant only if validation accuracy improves.
-
-This gives you a controlled way to see if letting Track A fine‑tune the encoder helps, without making it the default.
-
-### 3.3 Recommended default values in `config.yaml` (Track A)
-
-Under `track_a` in `config.yaml`, set reasonable starting values:
-
-```yaml
-track_a:
-  mlp_hidden_dim:      512
-  mlp_dropout:         0.2
-  learning_rate:       1e-4
-  distill_weight:      0.3
-  distill_temperature: 2.0
-  freeze_track_b:      true
-  epochs:              5
-  batch_size:          16
-```
-
-These will be the starting point for `run_track_a_experiments.py` and will be overwritten by the best‑performing combination.
+This document focuses on how these components change conceptually, and the **Migration checklist**
+(Section 8) provides concrete steps for modifying them.
 
 ---
 
-## 4. README.md Updates (Hyperparameter Sweeps)
+## 3. Motivation for the Backbone Change
 
-Below is a **ready‑to‑paste** section for `README.md` so non‑experts can run the sweeps and tweak ranges.
+After extensive experimentation with the BGE-large backbone, the following techniques were tried:
 
-### 4.1 Section to add to README.md
+- Hard negative mining
+- SimCSE-style objectives
+- Curriculum learning and loss re-weighting
+- Data augmentation with lexical perturbations
+- Cross-encoder teacher and distillation (APPROACH v8)
+- Multiple projection head and regularization settings
 
-```markdown
-## Hyperparameter Sweeps
+Despite the sophistication of the pipeline, the system **plateaued** at:
 
-This project includes simple scripts to run **hyperparameter sweeps** for both tracks.
-They are designed so you can try a few configurations without touching the training code.
+- **Track A:** ~0.95 accuracy  
+- **Track B:** ~0.94 accuracy  
 
----
+Many additional tweaks either left performance unchanged or **slightly degraded** it, which strongly
+suggests that the **representation quality of the backbone** (and/or dataset noise) has become the main
+bottleneck, rather than head architecture or loss design.
 
-### Track B – Embedding Model
+### Why Qwen3-Embedding?
 
-Use `scripts/run_track_b_experiments.py` to search for better hyperparameters for the
-embedding (Track B) model.
+Qwen3-Embedding models achieve top performance on the **MTEB English** family of benchmarks and are
+explicitly designed as **embedding models** (not generic instruction-following LLMs). Key properties:
 
-```bash
-python scripts/run_track_b_experiments.py
-```
+- Very strong semantic representations for English sentence and document similarity
+- Long-context support (token windows up to 8192), which is valuable for narrative stories
+- Architecturally optimized for embedding extraction (e.g., last-token pooling)
+- Compatible with cosine similarity and SentenceTransformers-style usage
+- Open weights, suitable for research competitions
 
-What this script does:
-
-1. Backs up your current `config.yaml` to `config.yaml.backup`.
-2. Trains a **baseline** model with the current settings.
-3. Tries several incremental improvements:
-   - Different projection dropout and projection‑head weight decay.
-   - Temperature × margin sweep for the pairwise loss.
-   - Hard negative mining settings.
-   - Optional SimCSE regularization.
-4. Only keeps experiments that improve validation accuracy.
-5. Saves all results in `experiments_track_b.json`.
-6. Writes the best‑performing configuration back into `config.yaml`.
-
-**Where to change ranges**
-
-- Temperature and margin grids are defined in `config.yaml` under `track_b`:
-
-  ```yaml
-  track_b:
-    temperature_grid: [0.5, 0.7, 0.9, 1.1]
-    margin_grid:      [0.05, 0.1, 0.2, 0.3]
-  ```
-
-- Regularization ranges (projection dropout and projection weight decay) are defined as Python
-  lists at the top of `scripts/run_track_b_experiments.py`:
-
-  ```python
-  REG_DROPOUTS = [0.0, 0.1, 0.2]
-  REG_WEIGHT_DECAYS = [0.03, 0.06, 0.1]
-  ```
-
-  To try more or fewer values, just edit these lists.
-
-- Hard negative settings are also controlled in `scripts/run_track_b_experiments.py`:
-
-  ```python
-  HARD_K      = [3, 5, 7]
-  HARD_EPOCHS = [1, 2]
-  ```
-
-  The script loops over these values and keeps only the best combination.
+Given these properties, upgrading to Qwen3-Embedding is a **high-leverage change** that can improve both
+Track A and Track B without re-architecting the entire pipeline.
 
 ---
 
-### Track A – Triple Classification
+## 4. Selected Models
 
-We recommend using a similar script for Track A: `scripts/run_track_a_experiments.py`.
-This script runs the triple classifier training with different hyperparameters and selects
-the best configuration.
+### Phase 1: Initial Validation – `Qwen/Qwen3-Embedding-4B`
 
-```bash
-python scripts/run_track_a_experiments.py
-```
+- Lower memory footprint and faster iterations
+- Used to:
+  - Verify training scripts and configs
+  - Tune basic hyperparameters (batch size, LR, projection size)
+  - Validate that the new embeddings perform at least as well as BGE-large
 
-This script should:
+### Phase 2: High-Accuracy Runs – `Qwen/Qwen3-Embedding-8B`
 
-1. Backup `config.yaml` to `config.yaml.backup`.
-2. Run a baseline training with the current `track_a` settings.
-3. Try different combinations of:
-
-   - `mlp_hidden_dim` (e.g. 512, 1024)
-   - `mlp_dropout` (e.g. 0.1, 0.2, 0.3)
-   - `learning_rate` (e.g. 5e-5, 1e-4, 2e-4)
-   - `distill_weight` (e.g. 0.0, 0.3, 0.5)
-   - `freeze_track_b` (True vs False, for light joint fine‑tuning)
-
-4. Parse the validation accuracy from the training logs.
-5. Save all results to `experiments_track_a.json`.
-6. Update `config.yaml` with the best‑performing configuration.
-
-**Where to change ranges**
-
-At the top of `scripts/run_track_a_experiments.py`, define the ranges as simple Python lists:
-
-```python
-HIDDEN_DIMS     = [512, 1024]
-DROPOUTS        = [0.1, 0.2, 0.3]
-LEARNING_RATES  = [5e-5, 1e-4, 2e-4]
-DISTILL_WEIGHTS = [0.0, 0.3, 0.5]
-FREEZE_OPTIONS  = [True, False]
-```
-
-To explore a different range, just edit these lists; you do **not** need to touch the
-training code.
-```
+- Higher capacity and stronger performance on public benchmarks
+- Used for:
+  - Final Track B training runs
+  - Embedding generation for final submissions
+- Only adopted once:
+  - The 4B version is stable
+  - Hardware constraints (VRAM) are confirmed to be sufficient
 
 ---
 
-## 5. Summary of v10 Changes
+## 5. Track B: Embedding Model Approach
 
-- **Track B**:
-  - Trainer architecture unchanged.
-  - `run_track_b_experiments.py` becomes the primary interface for training.
-  - Regularization, temperature/margin, and hard negative settings are searched via small grids
-    defined in `config.yaml` and at the top of the script.
+### 5.1 Objective
 
-- **Track A**:
-  - Model architecture unchanged.
-  - New `run_track_a_experiments.py` script controls hyperparameter sweeps for the MLP head and
-    distillation strength.
-  - Ranges are declared in one place (lists at the top of the script) so they are easy to modify.
+The goal of Track B is to produce a **single embedding per story** such that cosine similarity between
+embeddings reflects narrative similarity. Importantly, **each story must be embedded independently** at
+inference time (no triple-level or cross-story conditioning is allowed).
 
-- **README**:
-  - New section explaining, in simple terms, how to run sweeps and where to edit the search ranges,
-    aimed at users who are not familiar with hyperparameter tuning.
+### 5.2 Architecture
 
-This approach focuses squarely on **systematic tuning** around your already strong models, which is the
-most realistic way to push accuracy beyond the current ~0.94/0.95 without over‑engineering the system.
+- **Base encoder:** Qwen3-Embedding (4B or 8B)
+- **Tokenizer:** The official tokenizer shipped with Qwen3-Embedding
+- **Pooling strategy:** **Last-token pooling** (recommended by Qwen for embeddings)
+- **Projection head:**
+  - Optional linear or shallow MLP projection from encoder dimension to a fixed embedding size
+  - Final L2 normalization of the projection output
+
+High-level flow:
+
+```text
+Text → Qwen3 Encoder → Last Token Representation → Projection Head → Normalize → Embedding
+```
+
+The projection head allows us to:
+- Control final embedding dimensionality (if needed for Codabench limits)
+- Adapt the representation slightly to the task without overfitting the full transformer
+
+### 5.3 Training Strategy
+
+The training pipeline is intentionally **simplified** compared to earlier versions, because experience
+showed that excessive loss complexity (e.g. multi-stage curricula, aggressive hard negatives) often
+degraded generalization on this relatively small, noisy dataset.
+
+Core elements:
+
+- Supervision based on triples (anchor, positive, negative)
+- Embedding similarity measured via cosine distance
+- Early stopping on local triple-wise accuracy (using `eval_local.py`)
+
+Recommended loss combination:
+
+1. **Pairwise softmax loss** on (anchor, positive, negative) similarity scores
+2. **Light margin ranking loss** on the same triples
+
+Hard negatives, SimCSE, and complex multi-stage curricula from previous approaches are **disabled**
+or kept extremely conservative in v11.
+
+### 5.4 Relationship with Previous Versions
+
+- The input data preparation, batching, and evaluation logic remain the same.
+- The **only major change** is the base encoder (`Qwen/Qwen3-Embedding-*` instead of BGE-large).
+- This design allows a clean attribution of any performance gains to the backbone change.
+
+---
+
+## 6. Track A: Pairwise Decision Model
+
+### 6.1 Objective
+
+Given a triple (anchor, A, B), pick which candidate (A or B) is **more narratively similar** to the anchor.
+
+### 6.2 Architecture
+
+Track A continues to operate as a **lightweight classifier on top of Track B embeddings**:
+
+1. Use the trained Track B model (Qwen3-based) to embed:
+   - Anchor story → `e_anchor`
+   - Candidate A  → `e_A`
+   - Candidate B  → `e_B`
+
+2. For each candidate pair (anchor, candidate) build feature vectors such as:
+   - Concatenation: `[e_anchor, e_candidate]`
+   - Absolute difference: `|e_anchor − e_candidate|`
+   - Elementwise product: `e_anchor ⊙ e_candidate`
+
+   Typically combined as:
+   ```text
+   features = [e_anchor, e_candidate, |e_anchor − e_candidate|, e_anchor ⊙ e_candidate]
+   ```
+
+3. Feed features into a small MLP classifier:
+   - 1–2 hidden layers
+   - GELU/ReLU activations
+   - Dropout for regularization
+   - Output: logits `[logit_A, logit_B]` for the two candidates
+
+4. Apply cross-entropy loss over the two logits using the ground truth label (which candidate is closer).
+
+### 6.3 Improvements in v11
+
+- The **only major change** on Track A is the **stronger embedding backbone** (Qwen3 instead of BGE-large).
+- Optional robustness enhancements:
+  - Train multiple MLP heads with different random seeds; average logits at inference
+  - Use very light fine-tuning of the last few encoder layers with a small learning rate, if useful
+
+The decision rule and output format remain unchanged and continue to satisfy Codabench requirements.
+
+---
+
+## 7. Inference & Submission
+
+### 7.1 Track B Inference
+
+- For each story in the dataset:
+  1. Tokenize the text with the Qwen3-Embedding tokenizer
+  2. Run the Qwen3 encoder to obtain hidden states
+  3. Apply last-token pooling (or the official pooling layer)
+  4. Pass through the projection head (if used)
+  5. Normalize the resulting vector
+
+- Store the resulting embeddings as:
+  - Arrays of floats (one vector per story), or
+  - A serialization format expected by Codabench
+
+Each story is processed **independently**, which fully respects Track B rules.
+
+### 7.2 Track A Inference
+
+- For each triple (anchor, A, B):
+  1. Load or compute `e_anchor`, `e_A`, `e_B` using the Track B model
+  2. Build features for (anchor, A) and (anchor, B)
+  3. Pass features through the trained MLP head (or an ensemble of heads)
+  4. Select the candidate with higher logit / probability
+
+The prediction for each triple is written in the same structure as previous approaches so that
+`track_a.py` and the Codabench submission format do not need to change.
+
+---
+
+## 8. Migration Checklist (from BGE-large to Qwen3-Embedding)
+
+This section enumerates the **practical steps** required to migrate the repository from
+`BAAI/bge-large-en-v1.5` to Qwen3-Embedding.
+
+### 8.1 Configuration Files
+
+1. Open `config.yaml` (and `best_config.yaml` if used as a template).
+2. Locate the field defining the base model, e.g.:
+   - `model_name: "BAAI/bge-large-en-v1.5"`  
+   or  
+   - `base_model: "BAAI/bge-large-en-v1.5"`
+3. Replace with:
+   - Phase 1:
+     ```yaml
+     model_name: "Qwen/Qwen3-Embedding-4B"
+     ```
+   - Phase 2 (after validation):
+     ```yaml
+     model_name: "Qwen/Qwen3-Embedding-8B"
+     ```
+4. If the config specifies pooling:
+   - Set to `"last_token"` or the corresponding Qwen3-Embedding pooling option.
+5. Review embedding dimension settings:
+   - Ensure any `embedding_dim` parameters match the Qwen3 encoder or the projection-head output size.
+
+### 8.2 `train_track_b.py`
+
+1. Update the model loading to use Qwen3-Embedding:
+   - Replace references to BGE-large with Qwen model names.
+2. Ensure the tokenizer and config are taken from the Qwen3-Embedding checkpoint.
+3. Confirm pooling logic:
+   - Use the official pooling for Qwen3 or implement last-token pooling explicitly.
+4. Verify the projection head input dimension:
+   - It must match the encoder hidden size of Qwen3-Embedding.
+5. Keep existing training loops, loss functions, and evaluation hooks unchanged for the first runs
+   (to isolate the backbone effect).
+
+### 8.3 `run_track_b_experiments.py`
+
+1. Keep the experiment structure and hyperparameter ranges as-is initially.
+2. If GPU memory is tight:
+   - Adjust batch sizes and gradient accumulation steps for Qwen3-Embedding-4B / 8B.
+3. Clearly tag v11 runs in logs (e.g. experiment name or output folder) to distinguish from BGE runs.
+
+### 8.4 `train_track_a.py`
+
+1. Update the code that loads the Track B model:
+   - Point it to the **Qwen3-based** Track B checkpoint directories.
+2. Keep the MLP head architecture unchanged initially.
+3. Optional: add support for training multiple heads with different seeds for ensembling.
+
+### 8.5 `track_b.py` and `track_a.py` (Inference)
+
+1. Update any hardcoded base model names to Qwen3-Embedding.
+2. Ensure the embedding dimension used when serializing to Codabench matches the new model:
+   - If a projection head is used, the dimension is the projection output size.
+3. No changes are required in the **output format**; only the underlying model is swapped.
+
+### 8.6 Local Evaluation
+
+1. Use `eval_local.py` to:
+   - Compare the local triple-wise metrics of Qwen3-based embeddings against BGE-based ones.
+2. Only after the Qwen3 version is clearly non-regressing locally, proceed to Codabench submissions.
+
+---
+
+## 9. Risks, Constraints & Mitigations
+
+### 9.1 Increased Computational Cost
+
+- **Risk:** Qwen3-Embedding-4B/8B requires more GPU memory and compute than BGE-large.
+- **Mitigation:**
+  - Start with **4B** for development and hyperparameter tuning.
+  - Use smaller batch sizes and gradient accumulation steps.
+  - Use mixed precision (fp16/bf16) if supported.
+
+### 9.2 Overfitting to Small / Noisy Data
+
+- **Risk:** A stronger backbone can overfit if the dataset is small and noisy.
+- **Mitigation:**
+  - Keep the loss design simple and robust.
+  - Use early stopping on a held-out validation set.
+  - Prefer regularization via dropout and weight decay instead of very complex objectives.
+
+### 9.3 Incompatibility with Existing Code
+
+- **Risk:** Model dimension or pooling assumptions for BGE-large may not match Qwen3-Embedding.
+- **Mitigation:**
+  - Explicitly check encoder hidden size and adjust the projection head accordingly.
+  - Ensure pooling logic (last-token vs CLS/mean) is correct and consistently applied.
+
+### 9.4 Leaderboard Variance
+
+- **Risk:** Even if Qwen3-Embedding improves average embedding quality, leaderboard scores may fluctuate
+  by ±1% due to data and evaluation variance.
+- **Mitigation:**
+  - Run multiple seeds and average results when feasible.
+  - Use ensembling for Track A heads.
+  - Only adopt major config changes if they show consistent benefits across seeds.
+
+---
+
+## 10. Summary
+
+APPROACH v11 upgrades the embedding backbone from **BAAI/bge-large-en-v1.5** to **Qwen3-Embedding** while
+keeping the proven Track A / Track B pipeline largely intact. The main goals are:
+
+- Leverage state-of-the-art embedding quality for narrative similarity
+- Respect all Codabench rules (independent story embeddings, compatible output formats)
+- Minimize architectural churn by isolating the change to the backbone
+- Provide a clear migration path and highlight risks and mitigations
+
+By combining a stronger backbone with a stable training procedure, v11 aims to push performance beyond
+the previous accuracy plateau without introducing unnecessary complexity.

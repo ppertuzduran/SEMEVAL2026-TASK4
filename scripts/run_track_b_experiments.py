@@ -1,8 +1,8 @@
 """
-Experiment runner for Track B improvements (v10).
+Experiment runner for Track B improvements (v11: Qwen3-Embedding).
 
 This script runs incremental experiments to test different improvements:
-1. Baseline (current config)
+1. Baseline (current config with Qwen3-Embedding-4B)
 2. + Better regularization (grid search over dropout × weight_decay)
 3. + Hyperparameter sweep (temperature × margin)
 4. + Hard negative mining (grid search over k × epochs)
@@ -10,6 +10,8 @@ This script runs incremental experiments to test different improvements:
 
 Each experiment builds on the previous one, keeping successful improvements.
 Results are saved to experiments_track_b.json for analysis.
+
+See APPROACH.md v11 for details on the Qwen3-Embedding backbone upgrade.
 """
 
 import json

@@ -1,11 +1,11 @@
 """
-Track B Inference: Embedding-based narrative similarity.
+Track B Inference: Embedding-based narrative similarity (v11: Qwen3-Embedding compatible).
 
 Google Colab inference script.
 
 This script:
 - Runs ONLY in Google Colab with GPU
-- Loads fine-tuned bi-encoder from Google Drive
+- Loads fine-tuned bi-encoder from Google Drive (supports both BGE-large and Qwen3-Embedding)
 - Loads data from Google Drive
 - Generates embeddings and evaluates on Track A
 - Saves embeddings (.npy) to Google Drive

@@ -1,8 +1,8 @@
 # Configuration for Narrative Similarity Training
 #
-# This configuration implements recommendations from APPROACH.md
-# See APPROACH.md for detailed explanation of each technique and parameter
-#Final v10
+# This configuration implements APPROACH v11 (Qwen3-Embedding backbone upgrade)
+# See APPROACH.md for detailed explanation of the backbone migration
+# v11: Qwen3-Embedding-4B (Phase 1 validation)
 # General settings
 seed: 42
 device: cuda  # or cpu
@@ -14,12 +14,13 @@ data:
   output_dir: "output"
   prepared_data_dir: "data/prepared"
 
-# Track B - Bi-encoder settings (v10: systematic hyperparameter tuning)
+# Track B - Bi-encoder settings (v11: Qwen3-Embedding backbone)
 track_b:
-  base_model: "BAAI/bge-large-en-v1.5"  # High-perf backbone per APPROACH
+  base_model: "Qwen/Qwen3-Embedding-4B"  # v11: Upgraded from BGE-large to Qwen3
+  pooling: "last_token"  # Qwen3 uses EOS-token (last-token) pooling
   model_save_path: "models/track_b_embedder"
-  # V10 Architecture: Projection head for dimensionality reduction
-  projection_dim: 512      # Reduce from 1024 to 512 for better generalization
+  # V11 Architecture: Projection head for dimensionality reduction
+  projection_dim: 512      # Reduce from Qwen3's native dim to 512 for consistency
   projection_dropout: 0.0  # Will be tuned via experiments (grid: 0.0, 0.1, 0.2)
   # Composite loss weights (v2 unified training)
   loss_weights:
@@ -29,14 +30,14 @@ track_b:
     simcse: 0.0            # SimCSE consistency loss weight (optional, enabled by experiments)
   margin: 0.05              # Margin for MarginRankingLoss
   # Training hyperparameters
-  batch_size: 4            # Reduced for composite loss (more memory intensive)
+  batch_size: 2            # v11: Reduced for Qwen3-4B (larger model, more VRAM)
   epochs: 4                # Unified training phase
   learning_rate: 2.0e-5
   warmup_steps: 500
   weight_decay: 0.01       # Weight decay for backbone
   projection_weight_decay: 0.05  # Projection head weight decay (tuned via experiments)
   temperature: 0.5         # Sharper softmax per APPROACH
-  max_seq_length: 384      # shorten sequences to save VRAM on T4
+  max_seq_length: 384      # Keep short for T4 VRAM (Qwen3 supports up to 32K)
   # Hard Negative Mining (tuned via experiments)
   enable_hard_negatives: true  # Set to true or let experiments decide
   hard_negative_k: 5            # Number of hard negatives per anchor (grid: 3, 5, 7)
