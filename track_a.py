@@ -1,11 +1,11 @@
 """
-Track A Inference: MLP Head over Track B embeddings (v11: Qwen3-Embedding compatible).
+Track A Inference: MLP Head over Track B embeddings (v2).
 
 Google Colab inference script.
 
 This script:
 - Runs ONLY in Google Colab with GPU
-- Loads Track B model and MLP head(s) from Google Drive (supports both BGE-large and Qwen3-Embedding)
+- Loads Track B model and MLP head(s) from Google Drive
 - Loads data from Google Drive
 - Uses MLP head ensemble for best accuracy
 - Saves predictions to Google Drive

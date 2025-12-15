@@ -1,11 +1,11 @@
 """
-Track B Inference: Embedding-based narrative similarity (v11: Qwen3-Embedding compatible).
+Track B Inference: Embedding-based narrative similarity (v11).
 
 Google Colab inference script.
 
 This script:
 - Runs ONLY in Google Colab with GPU
-- Loads fine-tuned bi-encoder from Google Drive (supports both BGE-large and Qwen3-Embedding)
+- Loads fine-tuned bi-encoder (v11: Qwen3-Embedding-0.6B backbone) from Google Drive
 - Loads data from Google Drive
 - Generates embeddings and evaluates on Track A
 - Saves embeddings (.npy) to Google Drive
@@ -121,13 +121,14 @@ def main():
     print(f"  ({len(data)/inference_time:.1f} samples/sec)")
     print(f"  Shape: {embeddings.shape}")
     
-    # Verify embedding dimension (should be 512 with v2 projection head)
+    # Verify embedding dimension (should be 512 with v11 projection head)
     expected_dim = 512
     if embeddings.shape[1] != expected_dim:
         print(f"⚠️  Warning: Expected {expected_dim}-dim embeddings, got {embeddings.shape[1]}-dim")
         print(f"  Make sure you're using a Track B model with projection head!")
     else:
-        print(f"✓ Verified: {expected_dim}-dim embeddings (v2 projection head)")
+        print(f"✓ Verified: {expected_dim}-dim embeddings (v11 projection head)")
+
     
     # Create lookup for evaluation
     embedding_lookup = dict(zip(data["text"], embeddings))

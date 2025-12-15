@@ -1,17 +1,14 @@
 """
-Training script for Track B: Bi-encoder with projection head (v11: Qwen3-Embedding).
+Training script for Track B: Bi-encoder with projection head (v11).
 
 Google Colab training script.
 
 This script implements the v11 approach from APPROACH.md:
-- Qwen3-Embedding-4B/8B backbone (upgraded from BGE-large)
-- Last-token (EOS-token) pooling for Qwen3
-- 512-dim projection head for consistency and generalization
-- Unified composite loss (MarginRanking + PairwiseSoftmax + MNR)
-- Hard negative mining for better discrimination
-- Hyperparameter sweep for optimal temperature and margin
-- Enhanced regularization (dropout, weight decay)
-- Optional SimCSE consistency loss
+- Qwen3-Embedding-0.6B backbone with last-token pooling
+- 512-dim projection head for better generalization on small datasets
+- Simplified loss design (pairwise softmax + margin ranking)
+- Optional hard negative mining (disabled by default)
+- Optional SimCSE consistency loss (disabled by default)
 - Temperature scaling for gradient sharpening
 - Mixed precision training (FP16)
 - Saves models to Google Drive
@@ -443,46 +440,6 @@ class CustomEvaluator:
         return accuracy
 
 
-def configure_pooling_for_qwen3(model: SentenceTransformer, pooling_mode: str = "last_token"):
-    """
-    Configure pooling strategy for Qwen3-Embedding models.
-    
-    Qwen3-Embedding uses EOS-token (last-token) pooling for optimal performance.
-    
-    Args:
-        model: Base SentenceTransformer
-        pooling_mode: Pooling strategy ("last_token" for Qwen3)
-    
-    Returns:
-        Model with properly configured pooling
-    """
-    # Check if model already has proper pooling
-    modules = list(model._modules.values())
-    
-    # Look for existing pooling layer
-    pooling_layer = None
-    for module in modules:
-        if isinstance(module, models.Pooling):
-            pooling_layer = module
-            break
-    
-    if pooling_layer is not None:
-        # Update existing pooling configuration
-        if pooling_mode == "last_token":
-            print(f"Configuring last-token pooling for Qwen3-Embedding...")
-            pooling_layer.pooling_mode_cls_token = False
-            pooling_layer.pooling_mode_mean_tokens = False
-            pooling_layer.pooling_mode_max_tokens = False
-            pooling_layer.pooling_mode_lasttoken = True
-            print(f"✓ Last-token pooling configured")
-        else:
-            print(f"⚠️  Using default pooling mode: {pooling_mode}")
-    else:
-        print(f"⚠️  No pooling layer found in model, relying on model defaults")
-    
-    return model
-
-
 def add_projection_head(model: SentenceTransformer, projection_dim: int, dropout: float = 0.0):
     """
     Add a projection head to reduce embedding dimensionality.
@@ -493,7 +450,6 @@ def add_projection_head(model: SentenceTransformer, projection_dim: int, dropout
         dropout: Dropout rate for regularization
     """
     word_embedding_dimension = model.get_sentence_embedding_dimension()
-    print(f"Encoder output dimension: {word_embedding_dimension}")
     
     # Add dense projection layer
     dense = models.Dense(
@@ -534,7 +490,7 @@ def main():
         sys.exit(1)
     
     print("="*60)
-    print("TRACK B TRAINING (V11: QWEN3-EMBEDDING) - GOOGLE COLAB")
+    print("TRACK B TRAINING (V2 + IMPROVEMENTS) - GOOGLE COLAB")
     print("="*60)
     
     # Setup Colab environment
@@ -553,45 +509,34 @@ def main():
     if device == 'cuda':
         print(f"GPU: {torch.cuda.get_device_name(0)}")
     
+    
     # Load base model
+    print(f"\nLoading base model: {config['track_b']['base_model']}")
     base_model_name = config['track_b']['base_model']
-    print(f"\nLoading base model: {base_model_name}")
     
-    # Check if model is pre-downloaded to Drive (for Qwen3-Embedding)
-    if "Qwen" in base_model_name:
-        # Try to load from Drive first (faster, avoids download)
-        drive_model_path = Path(colab_paths['models_dir']) / "Qwen3-Embedding-4B"
-        if drive_model_path.exists():
-            print(f"✓ Found pre-downloaded model in Drive: {drive_model_path}")
-            
-            # Copy to local storage first (Drive I/O is slow for large checkpoint shards)
-            local_model_path = Path("/content/Qwen3-Embedding-4B")
-            if not local_model_path.exists():
-                print(f"📋 Copying model to local storage for faster loading...")
-                print(f"   This is a one-time copy (~8GB, takes 2-3 minutes)...")
-                import shutil
-                shutil.copytree(drive_model_path, local_model_path)
-                print(f"✓ Model copied to: {local_model_path}")
-            else:
-                print(f"✓ Using cached local copy: {local_model_path}")
-            
-            # Load from local storage (much faster)
-            print(f"Loading model from local storage...")
-            model = SentenceTransformer(str(local_model_path), device=device)
-        else:
-            print(f"⚠️  Model not found in Drive at: {drive_model_path}")
-            print(f"Downloading from HuggingFace (this may take 5-10 minutes)...")
-            print(f"💡 Tip: Pre-download the model to Drive to speed up future runs")
-            model = SentenceTransformer(base_model_name, device=device)
+    # v11: Configure last-token pooling for Qwen3-Embedding models
+    if 'Qwen' in base_model_name:
+        print("Detected Qwen3-Embedding model - configuring last-token pooling...")
+        
+        # Load transformer and tokenizer
+        word_embedding_model = models.Transformer(base_model_name)
+        
+        # Configure last-token pooling (recommended for Qwen3-Embedding)
+        pooling_model = models.Pooling(
+            word_embedding_model.get_word_embedding_dimension(),
+            pooling_mode_cls_token=False,
+            pooling_mode_mean_tokens=False,
+            pooling_mode_max_tokens=False,
+            pooling_mode_lasttoken=True  # Last-token pooling for Qwen3
+        )
+        
+        # Build model with explicit pooling
+        model = SentenceTransformer(modules=[word_embedding_model, pooling_model], device=device)
+        print("✓ Configured last-token pooling for Qwen3-Embedding")
     else:
-        # For other models (e.g., BGE-large), download normally
+        # For non-Qwen models, use default pooling
         model = SentenceTransformer(base_model_name, device=device)
-    
-    # Configure pooling for Qwen3-Embedding (if specified)
-    pooling_mode = config['track_b'].get('pooling', None)
-    if pooling_mode:
-        print(f"\nConfiguring pooling mode: {pooling_mode}")
-        model = configure_pooling_for_qwen3(model, pooling_mode)
+        print("✓ Using default pooling strategy")
     
     # Add projection head with optional dropout
     projection_dim = config['track_b'].get('projection_dim', 512)
@@ -599,6 +544,7 @@ def main():
     print(f"\nAdding {projection_dim}-dim projection head (dropout={projection_dropout})...")
     model = add_projection_head(model, projection_dim, dropout=projection_dropout)
     print(f"✓ Model now outputs {projection_dim}-dimensional embeddings")
+
     
     # Shorten max sequence length
     if 'max_seq_length' in config['track_b']:

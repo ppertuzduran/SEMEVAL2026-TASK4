@@ -1,371 +1,203 @@
-# APPROACH v11 – Qwen3-Embedding Backbone Upgrade
+# APPROACH v11 – Qwen3-Embedding-0.6B Backbone Upgrade
 
-## 1. Overview
+## Overview
 
-This document describes **APPROACH v11**, an evolution of the previous methodology used in this competition.
+This document describes **APPROACH v11**, an updated methodology for the Codabench narrative similarity
+competition.
+The central change in this version is the **replacement of the embedding backbone**
+`BAAI/bge-large-en-v1.5` with **Qwen3-Embedding-0.6B**.
 
-The key change in this version is the **replacement of the backbone embedding model**
-`BAAI/bge-large-en-v1.5` with **Qwen3-Embedding**, starting with:
+This model is selected as the *initial and primary backbone* to balance:
+- Embedding quality
+- Training stability
+- GPU memory constraints
+- Faster experimentation cycles
 
-1. **Qwen/Qwen3-Embedding-4B** (initial validation and tuning), then  
-2. **Qwen/Qwen3-Embedding-8B** (final high-accuracy runs, subject to GPU resources).
-
-All other components (training scripts, loss design, evaluation logic, and inference format) are kept as
-consistent as possible to **isolate the impact of the backbone change**.
-
-The rest of this document is organized as:
-
-- Repository & script mapping
-- Motivation for the backbone change
-- Detailed Track B approach (embeddings)
-- Detailed Track A approach (pairwise decision)
-- Inference and submission format
-- **Migration checklist** (what to change in code/configs)
-- **Risks, constraints & mitigations**
+All other components of the pipeline (training logic, losses, evaluation, and inference format)
+are intentionally kept consistent to ensure that observed performance changes are attributable
+to the backbone upgrade.
 
 ---
 
-## 2. Repository & Script Mapping
+## Motivation for the Backbone Change
 
-The approach assumes the following core files and roles in the repository:
+After extensive experimentation with the previous approach, including:
 
-- **High-level documentation**
-  - `APPROACH.md` (this document)
-
-- **Training – Track B (embeddings)**
-  - `train_track_b.py`  
-    Main training entrypoint for Track B. Loads a base encoder, wraps it in a SentenceTransformer,
-    applies a projection head, and trains using triple-wise/narrative similarity supervision.
-  - `run_track_b_experiments.py`  
-    Orchestrates multiple training runs with different hyperparameters and writes logs.
-
-- **Training – Track A (triple decision)**
-  - `train_track_a.py`  
-    Loads a trained Track B model (frozen or lightly tuned), attaches an MLP classifier on top of
-    pairwise features, and trains on triples.
-
-- **Inference**
-  - `track_b.py`  
-    Generates final Track B embeddings for all stories to be submitted to Codabench.
-  - `track_a.py`  
-    Uses Track B embeddings and the Track A classifier to generate A/B decisions for all triples.
-
-- **Evaluation & utilities**
-  - `eval_local.py`  
-    Local evaluation script to compute accuracy and/or the Codabench metric based on generated
-    embeddings or predictions.
-  - `augment_training_data.py`  
-    Script used to build an augmented training set for Track B (lexical perturbations, filters, etc.).
-
-- **Configuration**
-  - `config.yaml`, `best_config.yaml`, `configv8.yaml`  
-    YAML files describing model, training, and data parameters for different approach versions.
-    In v11, the model `name` or `base_model` field is updated to point to Qwen3-Embedding.
-
-This document focuses on how these components change conceptually, and the **Migration checklist**
-(Section 8) provides concrete steps for modifying them.
-
----
-
-## 3. Motivation for the Backbone Change
-
-After extensive experimentation with the BGE-large backbone, the following techniques were tried:
-
-- Hard negative mining
+- Hard-negative mining
 - SimCSE-style objectives
-- Curriculum learning and loss re-weighting
-- Data augmentation with lexical perturbations
-- Cross-encoder teacher and distillation (APPROACH v8)
-- Multiple projection head and regularization settings
+- Curriculum learning
+- Data augmentation
+- Cross-encoder and distillation-based models
 
-Despite the sophistication of the pipeline, the system **plateaued** at:
+the system reached a stable performance plateau:
+- **Track A:** ~0.95 accuracy
+- **Track B:** ~0.94 accuracy
 
-- **Track A:** ~0.95 accuracy  
-- **Track B:** ~0.94 accuracy  
+These results indicate that the current bottleneck is no longer the training strategy but the
+**representational capacity of the embedding backbone**.
 
-Many additional tweaks either left performance unchanged or **slightly degraded** it, which strongly
-suggests that the **representation quality of the backbone** (and/or dataset noise) has become the main
-bottleneck, rather than head architecture or loss design.
+### Why Qwen3-Embedding-0.6B?
 
-### Why Qwen3-Embedding?
+Qwen3-Embedding models represent the latest generation of dedicated embedding architectures.
+The **0.6B variant** provides a strong trade-off between quality and efficiency:
 
-Qwen3-Embedding models achieve top performance on the **MTEB English** family of benchmarks and are
-explicitly designed as **embedding models** (not generic instruction-following LLMs). Key properties:
+- Significantly stronger semantic representations than older BGE models
+- Designed explicitly for embedding tasks (not instruction tuning)
+- Competitive performance on MTEB English benchmarks
+- Lower memory footprint than 4B/8B variants
+- Suitable for rapid iteration and stable fine-tuning
 
-- Very strong semantic representations for English sentence and document similarity
-- Long-context support (token windows up to 8192), which is valuable for narrative stories
-- Architecturally optimized for embedding extraction (e.g., last-token pooling)
-- Compatible with cosine similarity and SentenceTransformers-style usage
-- Open weights, suitable for research competitions
-
-Given these properties, upgrading to Qwen3-Embedding is a **high-leverage change** that can improve both
-Track A and Track B without re-architecting the entire pipeline.
+This makes Qwen3-Embedding-0.6B an ideal backbone for this competition stage.
 
 ---
 
-## 4. Selected Models
+## Selected Model
 
-### Phase 1: Initial Validation – `Qwen/Qwen3-Embedding-4B`
-
-- Lower memory footprint and faster iterations
-- Used to:
-  - Verify training scripts and configs
-  - Tune basic hyperparameters (batch size, LR, projection size)
-  - Validate that the new embeddings perform at least as well as BGE-large
-
-### Phase 2: High-Accuracy Runs – `Qwen/Qwen3-Embedding-8B`
-
-- Higher capacity and stronger performance on public benchmarks
-- Used for:
-  - Final Track B training runs
-  - Embedding generation for final submissions
-- Only adopted once:
-  - The 4B version is stable
-  - Hardware constraints (VRAM) are confirmed to be sufficient
+- **Model:** `Qwen/Qwen3-Embedding-0.6B`
+- **Context length:** up to 8192 tokens
+- **Embedding objective:** semantic similarity
+- **Inference compatibility:** cosine similarity
 
 ---
 
-## 5. Track B: Embedding Model Approach
+## Track B: Embedding Model Training
 
-### 5.1 Objective
+### Objective
 
-The goal of Track B is to produce a **single embedding per story** such that cosine similarity between
-embeddings reflects narrative similarity. Importantly, **each story must be embedded independently** at
-inference time (no triple-level or cross-story conditioning is allowed).
+Produce a vector representation for each individual story such that cosine similarity aligns
+with narrative similarity, while strictly respecting the rule that **embeddings are generated
+independently per story at inference time**.
 
-### 5.2 Architecture
+### Architecture
 
-- **Base encoder:** Qwen3-Embedding (4B or 8B)
-- **Tokenizer:** The official tokenizer shipped with Qwen3-Embedding
-- **Pooling strategy:** **Last-token pooling** (recommended by Qwen for embeddings)
-- **Projection head:**
-  - Optional linear or shallow MLP projection from encoder dimension to a fixed embedding size
-  - Final L2 normalization of the projection output
+- Base encoder: Qwen3-Embedding-0.6B
+- Pooling strategy: **Last-token pooling** (recommended by the model authors)
+- Projection head:
+  - Shallow linear or MLP projection to a fixed embedding dimension
+  - L2 normalization applied to final embeddings
 
-High-level flow:
-
-```text
-Text → Qwen3 Encoder → Last Token Representation → Projection Head → Normalize → Embedding
+```
+Story Text
+   ↓
+Qwen3 Encoder
+   ↓
+Last Token Representation
+   ↓
+Projection Head
+   ↓
+L2 Normalization
+   ↓
+Final Embedding
 ```
 
-The projection head allows us to:
-- Control final embedding dimensionality (if needed for Codabench limits)
-- Adapt the representation slightly to the task without overfitting the full transformer
+### Training Strategy
 
-### 5.3 Training Strategy
+The Track B training pipeline reuses the existing implementation with minimal modifications:
 
-The training pipeline is intentionally **simplified** compared to earlier versions, because experience
-showed that excessive loss complexity (e.g. multi-stage curricula, aggressive hard negatives) often
-degraded generalization on this relatively small, noisy dataset.
+- Pairwise supervision derived from triples
+- Triple-wise margin ranking
+- Cosine similarity as the primary metric
+- Early stopping based on local triple accuracy
 
-Core elements:
+To improve generalization, the loss design is intentionally **simple and conservative**:
 
-- Supervision based on triples (anchor, positive, negative)
-- Embedding similarity measured via cosine distance
-- Early stopping on local triple-wise accuracy (using `eval_local.py`)
+- Pairwise softmax loss
+- Light margin ranking loss
+- No aggressive hard-negative mining
+- No SimCSE-style self-supervision
 
-Recommended loss combination:
-
-1. **Pairwise softmax loss** on (anchor, positive, negative) similarity scores
-2. **Light margin ranking loss** on the same triples
-
-Hard negatives, SimCSE, and complex multi-stage curricula from previous approaches are **disabled**
-or kept extremely conservative in v11.
-
-### 5.4 Relationship with Previous Versions
-
-- The input data preparation, batching, and evaluation logic remain the same.
-- The **only major change** is the base encoder (`Qwen/Qwen3-Embedding-*` instead of BGE-large).
-- This design allows a clean attribution of any performance gains to the backbone change.
+This choice is motivated by empirical findings that excessive loss complexity degraded performance.
 
 ---
 
-## 6. Track A: Pairwise Decision Model
+## Track A: Pairwise Similarity Decision
 
-### 6.1 Objective
+### Objective
 
-Given a triple (anchor, A, B), pick which candidate (A or B) is **more narratively similar** to the anchor.
+Given a triple consisting of an anchor story and two candidate stories (A, B), determine which
+candidate is more similar to the anchor.
 
-### 6.2 Architecture
+### Architecture
 
-Track A continues to operate as a **lightweight classifier on top of Track B embeddings**:
+Track A leverages the embeddings produced by Track B:
 
-1. Use the trained Track B model (Qwen3-based) to embed:
-   - Anchor story → `e_anchor`
-   - Candidate A  → `e_A`
-   - Candidate B  → `e_B`
+1. Independently embed:
+   - Anchor
+   - Candidate A
+   - Candidate B
+2. Construct pairwise feature vectors:
+   - `[e_anchor, e_candidate, |e_anchor − e_candidate|, e_anchor ⊙ e_candidate]`
+3. Pass features through a lightweight MLP classifier
+4. Output logits corresponding to candidate A vs B
 
-2. For each candidate pair (anchor, candidate) build feature vectors such as:
-   - Concatenation: `[e_anchor, e_candidate]`
-   - Absolute difference: `|e_anchor − e_candidate|`
-   - Elementwise product: `e_anchor ⊙ e_candidate`
+This architecture was chosen due to its robustness under limited supervision and its ability
+to exploit high-quality embeddings effectively.
 
-   Typically combined as:
-   ```text
-   features = [e_anchor, e_candidate, |e_anchor − e_candidate|, e_anchor ⊙ e_candidate]
+### Robustness Enhancements
+
+- Multiple MLP heads trained with different random seeds
+- Logit averaging across heads at inference time
+- Optional temperature scaling on validation data
+
+---
+
+## Inference
+
+### Track B
+
+- Each story is encoded **once and independently**
+- The output is a single fixed-size vector per story
+- Cosine similarity is used for all similarity computations
+
+### Track A
+
+- For each triple:
+  - Compute embeddings for anchor, A, and B
+  - Apply the MLP classifier
+  - Select the candidate with the higher predicted similarity
+
+All inference outputs strictly follow Codabench submission specifications.
+
+---
+
+## Migration Checklist (from BGE-large to Qwen3-Embedding-0.6B)
+
+1. Replace the backbone model name:
+   ```python
+   model_name = "Qwen/Qwen3-Embedding-0.6B"
    ```
-
-3. Feed features into a small MLP classifier:
-   - 1–2 hidden layers
-   - GELU/ReLU activations
-   - Dropout for regularization
-   - Output: logits `[logit_A, logit_B]` for the two candidates
-
-4. Apply cross-entropy loss over the two logits using the ground truth label (which candidate is closer).
-
-### 6.3 Improvements in v11
-
-- The **only major change** on Track A is the **stronger embedding backbone** (Qwen3 instead of BGE-large).
-- Optional robustness enhancements:
-  - Train multiple MLP heads with different random seeds; average logits at inference
-  - Use very light fine-tuning of the last few encoder layers with a small learning rate, if useful
-
-The decision rule and output format remain unchanged and continue to satisfy Codabench requirements.
+2. Update pooling logic to use **last-token pooling**
+3. Reduce batch size if necessary (depending on GPU memory)
+4. Keep loss functions and evaluation logic unchanged
+5. Re-train Track B, then re-train Track A heads on the new embeddings
 
 ---
 
-## 7. Inference & Submission
+## Expected Benefits
 
-### 7.1 Track B Inference
-
-- For each story in the dataset:
-  1. Tokenize the text with the Qwen3-Embedding tokenizer
-  2. Run the Qwen3 encoder to obtain hidden states
-  3. Apply last-token pooling (or the official pooling layer)
-  4. Pass through the projection head (if used)
-  5. Normalize the resulting vector
-
-- Store the resulting embeddings as:
-  - Arrays of floats (one vector per story), or
-  - A serialization format expected by Codabench
-
-Each story is processed **independently**, which fully respects Track B rules.
-
-### 7.2 Track A Inference
-
-- For each triple (anchor, A, B):
-  1. Load or compute `e_anchor`, `e_A`, `e_B` using the Track B model
-  2. Build features for (anchor, A) and (anchor, B)
-  3. Pass features through the trained MLP head (or an ensemble of heads)
-  4. Select the candidate with higher logit / probability
-
-The prediction for each triple is written in the same structure as previous approaches so that
-`track_a.py` and the Codabench submission format do not need to change.
+- Improved semantic alignment for narrative similarity
+- Better generalization on unseen triples
+- Reduced sensitivity to noisy augmentation
+- Faster iteration cycles compared to larger backbones
+- A stronger foundation for future scaling (4B / 8B variants)
 
 ---
 
-## 8. Migration Checklist (from BGE-large to Qwen3-Embedding)
+## Summary of Changes
 
-This section enumerates the **practical steps** required to migrate the repository from
-`BAAI/bge-large-en-v1.5` to Qwen3-Embedding.
-
-### 8.1 Configuration Files
-
-1. Open `config.yaml` (and `best_config.yaml` if used as a template).
-2. Locate the field defining the base model, e.g.:
-   - `model_name: "BAAI/bge-large-en-v1.5"`  
-   or  
-   - `base_model: "BAAI/bge-large-en-v1.5"`
-3. Replace with:
-   - Phase 1:
-     ```yaml
-     model_name: "Qwen/Qwen3-Embedding-4B"
-     ```
-   - Phase 2 (after validation):
-     ```yaml
-     model_name: "Qwen/Qwen3-Embedding-8B"
-     ```
-4. If the config specifies pooling:
-   - Set to `"last_token"` or the corresponding Qwen3-Embedding pooling option.
-5. Review embedding dimension settings:
-   - Ensure any `embedding_dim` parameters match the Qwen3 encoder or the projection-head output size.
-
-### 8.2 `train_track_b.py`
-
-1. Update the model loading to use Qwen3-Embedding:
-   - Replace references to BGE-large with Qwen model names.
-2. Ensure the tokenizer and config are taken from the Qwen3-Embedding checkpoint.
-3. Confirm pooling logic:
-   - Use the official pooling for Qwen3 or implement last-token pooling explicitly.
-4. Verify the projection head input dimension:
-   - It must match the encoder hidden size of Qwen3-Embedding.
-5. Keep existing training loops, loss functions, and evaluation hooks unchanged for the first runs
-   (to isolate the backbone effect).
-
-### 8.3 `run_track_b_experiments.py`
-
-1. Keep the experiment structure and hyperparameter ranges as-is initially.
-2. If GPU memory is tight:
-   - Adjust batch sizes and gradient accumulation steps for Qwen3-Embedding-4B / 8B.
-3. Clearly tag v11 runs in logs (e.g. experiment name or output folder) to distinguish from BGE runs.
-
-### 8.4 `train_track_a.py`
-
-1. Update the code that loads the Track B model:
-   - Point it to the **Qwen3-based** Track B checkpoint directories.
-2. Keep the MLP head architecture unchanged initially.
-3. Optional: add support for training multiple heads with different seeds for ensembling.
-
-### 8.5 `track_b.py` and `track_a.py` (Inference)
-
-1. Update any hardcoded base model names to Qwen3-Embedding.
-2. Ensure the embedding dimension used when serializing to Codabench matches the new model:
-   - If a projection head is used, the dimension is the projection output size.
-3. No changes are required in the **output format**; only the underlying model is swapped.
-
-### 8.6 Local Evaluation
-
-1. Use `eval_local.py` to:
-   - Compare the local triple-wise metrics of Qwen3-based embeddings against BGE-based ones.
-2. Only after the Qwen3 version is clearly non-regressing locally, proceed to Codabench submissions.
+| Component | Previous | v11 |
+|---------|---------|----|
+| Backbone | BAAI/bge-large-en-v1.5 | Qwen3-Embedding-0.6B |
+| Pooling | CLS / mean | Last-token |
+| Loss design | Complex | Simplified |
+| Track A model | MLP on embeddings | Same (stronger embeddings) |
+| Inference rules | Unchanged | Unchanged |
 
 ---
 
-## 9. Risks, Constraints & Mitigations
+## Final Notes
 
-### 9.1 Increased Computational Cost
-
-- **Risk:** Qwen3-Embedding-4B/8B requires more GPU memory and compute than BGE-large.
-- **Mitigation:**
-  - Start with **4B** for development and hyperparameter tuning.
-  - Use smaller batch sizes and gradient accumulation steps.
-  - Use mixed precision (fp16/bf16) if supported.
-
-### 9.2 Overfitting to Small / Noisy Data
-
-- **Risk:** A stronger backbone can overfit if the dataset is small and noisy.
-- **Mitigation:**
-  - Keep the loss design simple and robust.
-  - Use early stopping on a held-out validation set.
-  - Prefer regularization via dropout and weight decay instead of very complex objectives.
-
-### 9.3 Incompatibility with Existing Code
-
-- **Risk:** Model dimension or pooling assumptions for BGE-large may not match Qwen3-Embedding.
-- **Mitigation:**
-  - Explicitly check encoder hidden size and adjust the projection head accordingly.
-  - Ensure pooling logic (last-token vs CLS/mean) is correct and consistently applied.
-
-### 9.4 Leaderboard Variance
-
-- **Risk:** Even if Qwen3-Embedding improves average embedding quality, leaderboard scores may fluctuate
-  by ±1% due to data and evaluation variance.
-- **Mitigation:**
-  - Run multiple seeds and average results when feasible.
-  - Use ensembling for Track A heads.
-  - Only adopt major config changes if they show consistent benefits across seeds.
-
----
-
-## 10. Summary
-
-APPROACH v11 upgrades the embedding backbone from **BAAI/bge-large-en-v1.5** to **Qwen3-Embedding** while
-keeping the proven Track A / Track B pipeline largely intact. The main goals are:
-
-- Leverage state-of-the-art embedding quality for narrative similarity
-- Respect all Codabench rules (independent story embeddings, compatible output formats)
-- Minimize architectural churn by isolating the change to the backbone
-- Provide a clear migration path and highlight risks and mitigations
-
-By combining a stronger backbone with a stable training procedure, v11 aims to push performance beyond
-the previous accuracy plateau without introducing unnecessary complexity.
+APPROACH v11 focuses on **raising the embedding quality ceiling** while preserving a proven,
+stable training and inference pipeline. By upgrading to Qwen3-Embedding-0.6B, this approach
+aims to unlock additional performance gains with minimal architectural risk and full
+compliance with competition constraints.
