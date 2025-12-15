@@ -61,9 +61,9 @@ def evaluate_track_a(predictions_path: str, labels_path: str) -> Dict:
             row = label_df.iloc[idx]
             incorrect_predictions.append({
                 'index': int(idx),
-                'anchor': row['anchor_text'][:50] + '...' if len(row['anchor_text']) > 50 else row['anchor_text'],
-                'text_a': row['text_a'][:50] + '...' if len(row['text_a']) > 50 else row['text_a'],
-                'text_b': row['text_b'][:50] + '...' if len(row['text_b']) > 50 else row['text_b'],
+                'anchor': row['anchor_text'],
+                'text_a': row['text_a'],
+                'text_b': row['text_b'],
                 'predicted': bool(pred),
                 'actual': bool(true)
             })
@@ -186,9 +186,9 @@ def evaluate_track_b_with_track_a(embeddings_path: str, labels_path: str, track_
         if sim_diff < uncertainty_threshold:
             uncertain_predictions.append({
                 'index': int(idx),
-                'anchor': row['anchor_text'][:50] + '...' if len(row['anchor_text']) > 50 else row['anchor_text'],
-                'text_a': row['text_a'][:50] + '...' if len(row['text_a']) > 50 else row['text_a'],
-                'text_b': row['text_b'][:50] + '...' if len(row['text_b']) > 50 else row['text_b'],
+                'anchor': row['anchor_text'],
+                'text_a': row['text_a'],
+                'text_b': row['text_b'],
                 'sim_a': float(sim_a),
                 'sim_b': float(sim_b),
                 'diff': float(sim_diff),
@@ -200,9 +200,9 @@ def evaluate_track_b_with_track_a(embeddings_path: str, labels_path: str, track_
         if pred != row['text_a_is_closer']:
             incorrect_predictions.append({
                 'index': int(idx),
-                'anchor': row['anchor_text'][:50] + '...' if len(row['anchor_text']) > 50 else row['anchor_text'],
-                'text_a': row['text_a'][:50] + '...' if len(row['text_a']) > 50 else row['text_a'],
-                'text_b': row['text_b'][:50] + '...' if len(row['text_b']) > 50 else row['text_b'],
+                'anchor': row['anchor_text'],
+                'text_a': row['text_a'],
+                'text_b': row['text_b'],
                 'sim_a': float(sim_a),
                 'sim_b': float(sim_b),
                 'diff': float(sim_diff),
@@ -276,12 +276,15 @@ def print_metrics(metrics: Dict, title: str):
         # Incorrect predictions
         print(f"\n✗ Incorrect Predictions: {metrics['incorrect_predictions_count']}")
         if metrics['incorrect_predictions_count'] > 0:
-            print(f"   Sample failures:")
-            for item in metrics['incorrect_predictions'][:5]:  # Show first 5
-                print(f"   - Index {item['index']}")
-                print(f"      Predicted: {'A' if item['predicted'] else 'B'}, Actual: {'A' if item['actual'] else 'B'}")
+            print(f"\n   Sample failures (showing first 5):")
+            for i, item in enumerate(metrics['incorrect_predictions'][:5], 1):
+                print(f"\n   [{i}] Index {item['index']}")
+                print(f"       Predicted: {'A' if item['predicted'] else 'B'}, Actual: {'A' if item['actual'] else 'B'}")
+                print(f"       Anchor: {item['anchor']}")
+                print(f"       Text A: {item['text_a']}")
+                print(f"       Text B: {item['text_b']}")
             if metrics['incorrect_predictions_count'] > 5:
-                print(f"   ... and {metrics['incorrect_predictions_count'] - 5} more")
+                print(f"\n   ... and {metrics['incorrect_predictions_count'] - 5} more")
     
     # Print Track B diagnostic information
     if 'missing_embeddings_count' in metrics:
@@ -306,21 +309,29 @@ def print_metrics(metrics: Dict, title: str):
         print(f"   (similarity difference < {metrics['uncertainty_threshold']:.3f})")
         if metrics['uncertain_predictions_count'] > 0:
             print(f"   Avg similarity diff: {metrics.get('avg_similarity_diff', 0):.4f}")
-            print(f"\n   Top uncertain cases:")
-            for item in metrics['uncertain_predictions'][:3]:  # Show first 3
+            print(f"\n   Top uncertain cases (showing first 3):")
+            for i, item in enumerate(metrics['uncertain_predictions'][:3], 1):
                 status = "✓" if item['predicted'] == item['actual'] else "✗"
-                print(f"   {status} Index {item['index']}: sim_a={item['sim_a']:.4f}, sim_b={item['sim_b']:.4f}, diff={item['diff']:.4f}")
-                print(f"      Predicted: {'A' if item['predicted'] else 'B'}, Actual: {'A' if item['actual'] else 'B'}")
+                print(f"\n   [{i}] {status} Index {item['index']}")
+                print(f"       Similarities: sim_a={item['sim_a']:.4f}, sim_b={item['sim_b']:.4f}, diff={item['diff']:.4f}")
+                print(f"       Predicted: {'A' if item['predicted'] else 'B'}, Actual: {'A' if item['actual'] else 'B'}")
+                print(f"       Anchor: {item['anchor']}")
+                print(f"       Text A: {item['text_a']}")
+                print(f"       Text B: {item['text_b']}")
         
         # Incorrect predictions
         print(f"\n✗ Incorrect Predictions: {metrics['incorrect_predictions_count']}")
         if metrics['incorrect_predictions_count'] > 0:
-            print(f"   Sample failures:")
-            for item in metrics['incorrect_predictions'][:3]:  # Show first 3
-                print(f"   - Index {item['index']}: sim_a={item['sim_a']:.4f}, sim_b={item['sim_b']:.4f}, diff={item['diff']:.4f}")
-                print(f"      Predicted: {'A' if item['predicted'] else 'B'}, Actual: {'A' if item['actual'] else 'B'}")
+            print(f"\n   Sample failures (showing first 3):")
+            for i, item in enumerate(metrics['incorrect_predictions'][:3], 1):
+                print(f"\n   [{i}] Index {item['index']}")
+                print(f"       Similarities: sim_a={item['sim_a']:.4f}, sim_b={item['sim_b']:.4f}, diff={item['diff']:.4f}")
+                print(f"       Predicted: {'A' if item['predicted'] else 'B'}, Actual: {'A' if item['actual'] else 'B'}")
+                print(f"       Anchor: {item['anchor']}")
+                print(f"       Text A: {item['text_a']}")
+                print(f"       Text B: {item['text_b']}")
             if metrics['incorrect_predictions_count'] > 3:
-                print(f"   ... and {metrics['incorrect_predictions_count'] - 3} more")
+                print(f"\n   ... and {metrics['incorrect_predictions_count'] - 3} more")
 
 
 def compare_models(metrics_list: list, names: list):
