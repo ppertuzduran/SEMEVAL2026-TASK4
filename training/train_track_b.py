@@ -560,7 +560,7 @@ def main():
     # Check if model is pre-downloaded to Drive (for Qwen3-Embedding)
     if "Qwen" in base_model_name:
         # Try to load from Drive first (faster, avoids download)
-        drive_model_path = colab_paths['models_dir'] / "Qwen3-Embedding-4B"
+        drive_model_path = Path(colab_paths['models_dir']) / "Qwen3-Embedding-4B"
         if drive_model_path.exists():
             print(f"✓ Found pre-downloaded model in Drive: {drive_model_path}")
             model = SentenceTransformer(str(drive_model_path), device=device)
