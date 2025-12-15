@@ -563,7 +563,21 @@ def main():
         drive_model_path = Path(colab_paths['models_dir']) / "Qwen3-Embedding-4B"
         if drive_model_path.exists():
             print(f"✓ Found pre-downloaded model in Drive: {drive_model_path}")
-            model = SentenceTransformer(str(drive_model_path), device=device)
+            
+            # Copy to local storage first (Drive I/O is slow for large checkpoint shards)
+            local_model_path = Path("/content/Qwen3-Embedding-4B")
+            if not local_model_path.exists():
+                print(f"📋 Copying model to local storage for faster loading...")
+                print(f"   This is a one-time copy (~8GB, takes 2-3 minutes)...")
+                import shutil
+                shutil.copytree(drive_model_path, local_model_path)
+                print(f"✓ Model copied to: {local_model_path}")
+            else:
+                print(f"✓ Using cached local copy: {local_model_path}")
+            
+            # Load from local storage (much faster)
+            print(f"Loading model from local storage...")
+            model = SentenceTransformer(str(local_model_path), device=device)
         else:
             print(f"⚠️  Model not found in Drive at: {drive_model_path}")
             print(f"Downloading from HuggingFace (this may take 5-10 minutes)...")
