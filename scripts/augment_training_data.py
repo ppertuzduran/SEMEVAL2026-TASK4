@@ -430,14 +430,63 @@ def main():
     save_jsonl(augmented_pairs, output_dir / "pairs.jsonl")
     save_jsonl(augmented_cross_encoder, output_dir / "cross_encoder_data.jsonl")
     
-    # Copy train/val split
-    import shutil
-    shutil.copy(prepared_dir / "train_val_split.json", output_dir / "train_val_split.json")
+    # Generate new train/val split that includes augmented data
+    # Load original split
+    with open(prepared_dir / "train_val_split.json", 'r') as f:
+        original_split = json.load(f)
+    
+    # The augmented data includes all original data at the beginning
+    # followed by augmented samples. We need to update the split to include
+    # all indices for the augmented dataset.
+    
+    # Original triplets are at indices 0 to len(triplets)-1
+    # Augmented triplets start at len(triplets)
+    # Total triplets: len(augmented_triplets)
+    
+    # For the new split:
+    # - Training indices: all indices from 0 to len(augmented_triplets)-1 that correspond
+    #   to original training indices OR augmented data
+    # - Validation indices: same as original (these are indices in the original dataset)
+    
+    # Since augmented data is appended after originals, we need to:
+    # 1. Keep the same validation indices (they reference original data)
+    # 2. Expand training indices to include all augmented samples
+    
+    original_train_indices = set(original_split['train'])
+    original_val_indices = set(original_split['val'])
+    
+    # New training indices include:
+    # - Original training indices (0 to len(triplets)-1 if in original train set)
+    # - All augmented indices (len(triplets) to len(augmented_triplets)-1)
+    new_train_indices = []
+    
+    # Add original training indices
+    for idx in range(len(triplets)):
+        if idx in original_train_indices:
+            new_train_indices.append(idx)
+    
+    # Add all augmented indices (they are all for training)
+    for idx in range(len(triplets), len(augmented_triplets)):
+        new_train_indices.append(idx)
+    
+    # Validation indices stay the same (they reference original data only)
+    new_val_indices = list(original_val_indices)
+    
+    # Save new split
+    new_split = {
+        'train': new_train_indices,
+        'val': new_val_indices
+    }
+    
+    with open(output_dir / "train_val_split.json", 'w') as f:
+        json.dump(new_split, f, indent=2)
     
     print(f"\n✓ Saved augmented triplets: {len(augmented_triplets)}")
     print(f"✓ Saved augmented pairs: {len(augmented_pairs)}")
     print(f"✓ Saved augmented cross-encoder: {len(augmented_cross_encoder)}")
-    print(f"✓ Copied train/val split")
+    print(f"✓ Generated new train/val split:")
+    print(f"    Train indices: {len(new_train_indices)} (includes {len(new_train_indices) - len(original_train_indices)} augmented)")
+    print(f"    Val indices: {len(new_val_indices)} (original validation set)")
     
     # Save samples for inspection
     save_samples({
