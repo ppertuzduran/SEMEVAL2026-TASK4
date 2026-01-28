@@ -11,6 +11,9 @@ device: cuda  # or cpu
 data:
   dev_track_a: "data/dev_track_a.jsonl"
   dev_track_b: "data/dev_track_b.jsonl"
+  # Test data paths (unlabeled - for submission)
+  # test_track_a: "data/test_track_a.jsonl"
+  # test_track_b: "data/test_track_b.jsonl"
   output_dir: "output"
   prepared_data_dir: "data/prepared"
 

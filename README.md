@@ -232,14 +232,42 @@ python training/train_track_a.py
 **Data Augmentation**: Same as Track B - will use augmented data if enabled.
 
 ### 5) Inference
+
+#### Development Data (with labels - for validation)
 ```bash
-python track_b.py   # embeddings, saves track_b.npy (512-dim)
-python track_a.py   # predictions, saves track_a.jsonl (uses Track B + MLP heads)
+python track_b.py   # embeddings, saves track_b.npy (512-dim) + reports accuracy
+python track_a.py   # predictions, saves track_a.jsonl (uses Track B + MLP heads) + reports accuracy
 ```
 
 **V2 Changes**:
 - `track_b.py`: Verifies 512-dim embeddings from projection head
 - `track_a.py`: Loads Track B model + MLP head ensemble (not cross-encoder)
+
+#### Test Data (unlabeled - for submission)
+For generating predictions on unlabeled test data:
+
+```bash
+# Track A: Generate predictions for test data
+python inference_track_a.py --test_data data/test_track_a.jsonl --output output/track_a_test.jsonl --batch_size 16
+
+# Track B: Generate embeddings for test data
+python inference_track_b.py --test_data data/test_track_b.jsonl --output output/track_b_test.npy --batch_size 32
+```
+
+**Arguments**:
+- `--test_data`: Path to test data JSONL file (required)
+- `--output`: Output path (optional, defaults to `output/track_a_test.jsonl` or `output/track_b_test.npy`)
+- `--batch_size`: Batch size for inference (optional, defaults: Track A=16, Track B=32)
+
+**Format Requirements**:
+- **Track A test data**: JSONL with columns `anchor_text`, `text_a`, `text_b` (no labels)
+- **Track B test data**: JSONL with column `text` (no labels)
+
+**Output Format**:
+- **Track A**: JSONL file with `text_a_is_closer` predictions (boolean)
+- **Track B**: NumPy `.npy` file with embeddings (shape: `[n_samples, 512]`)
+
+**Note**: These scripts work both locally and in Google Colab
 
 ### 6) Evaluation
 ```bash
