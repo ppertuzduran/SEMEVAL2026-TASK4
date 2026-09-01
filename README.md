@@ -84,7 +84,7 @@ augmentation:
 
 You have 3 options:
 
-#### **Option A: Automated Experiment Runner** 🤖 (Recommended - Best Results)
+#### **Option A: Automated Experiment Runner**  (Recommended - Best Results)
 Let the script systematically search for the best hyperparameters:
 ```bash
 python scripts/run_track_b_experiments.py
@@ -120,7 +120,7 @@ python scripts/run_track_b_experiments.py
 
 **Expected time**: ~60-90 minutes (depends on grid size)
 
-#### **Option B: Quick Manual Test** ⚡ (Fast - 17 min)
+#### **Option B: Quick Manual Test**  (Fast - 17 min)
 Just enable hyperparameter sweep to optimize current model:
 ```yaml
 # config.yaml
@@ -132,7 +132,7 @@ python training/train_track_b.py
 ```
 This tests temperature × margin combinations and picks the best.
 
-#### **Option C: Manual Configuration** 🎛️ (Custom)
+#### **Option C: Manual Configuration**  (Custom)
 Enable specific improvements in `config.yaml`:
 ```yaml
 track_b:
@@ -178,7 +178,7 @@ python training/train_track_b.py
 
 You have 2 options:
 
-#### **Option A: Automated Experiment Runner** 🤖 (Recommended - Best Results)
+#### **Option A: Automated Experiment Runner**  (Recommended - Best Results)
 Let the script systematically search for the best hyperparameters:
 ```bash
 python scripts/run_track_a_experiments.py
@@ -209,7 +209,7 @@ python scripts/run_track_a_experiments.py
 
 **Expected time**: ~45-60 minutes (depends on grid size)
 
-#### **Option B: Manual Training** 🎛️ (Custom)
+#### **Option B: Manual Training**  (Custom)
 Train with current config settings:
 ```bash
 python training/train_track_a.py
